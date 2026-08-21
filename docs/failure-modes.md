@@ -1,12 +1,24 @@
 # Failure modes
 
-Two ways a tiered classifier gets people hurt. Both are about **routing**, not
-accuracy — which is why the harness measures routing as a first-class thing and
-why `safe_miss_rate` is gated at 1.0 with no margin.
+Four ways a tiered classifier goes wrong. Three are about **routing** rather
+than accuracy — which is why the harness measures routing as a first-class
+thing and why `safe_miss_rate` is gated at 1.0 with no margin. The fourth is
+about the measurement itself.
 
-The shared shape: *a cheap tier returns a confident negative on a message it
-never had the means to read, and something downstream treats that as a
-clearance.*
+The shape shared by FM-1 through FM-3: *a cheap tier returns a confident
+negative on a message it never had the means to read, and something downstream
+treats that as a clearance.*
+
+| | what | found by |
+|---|---|---|
+| FM-1 | A voice gate reading a tier that cannot read | production incident (motivating case) |
+| FM-2 | Hostility seen, target unconfirmed | the harness, first run |
+| FM-3 | The degradation contract was documented, not implemented | code review |
+| FM-4 | The measurement was partly measuring itself | code review |
+
+Worth noting that only FM-1 came from the original system. FM-2 through FM-4
+were introduced *while building the thing that exists to prevent FM-1* — which
+is the honest argument for why the harness and the review both had to happen.
 
 ---
 
@@ -209,14 +221,39 @@ set, with `ollama:qwen3.5` re-scoring only the 40 messages T0 escalated:
 
 | | T0 alone | T0 + T1 |
 |---|---|---|
-| recall | 60.0% | **90.0%** |
-| precision | 96.0% | **97.3%** |
-| FPR | 3.3% | 3.3% |
+| recall | 53.2% | **87.2%** |
+| precision | 96.2% | **97.6%** |
+| FPR | 3.2% | 3.2% |
 
-**+30.0 recall points**, with precision going *up* rather than being traded
-away. That is the number that justifies the tier existing. If a change ever
-drives it toward zero, T1 should be deleted rather than tuned — and the harness
-is how you would find out.
+**+34.0 recall points** across 3 runs with spread 0.0, precision going *up*
+rather than being traded away. That is the number that justifies the tier
+existing. If a change ever drives it toward zero, T1 should be deleted rather
+than tuned — and the harness is how you would find out.
+
+### FM-4 — the measurement was partly measuring itself
+
+Worth recording as a failure mode in its own right, because it is the one that
+would have survived longest unnoticed.
+
+The golden set and T0's lexicon were authored together, so `t0_readable` recall
+of 95.8% was substantially the regexes being read back to themselves — four
+fixtures were near-verbatim copies of the patterns matching them. Splitting
+canonical wording from natural rephrasings:
+
+| slice | recall |
+|---|---:|
+| `verbatim` | 95.8% |
+| `paraphrase` | **14.3%** |
+
+T0 generalizes to roughly 1 in 7 ordinary rephrasings of categories it
+nominally covers. Nothing was broken; the number was just answering an easier
+question than the one it appeared to answer.
+
+The fix was to add the harder rows rather than delete the easy ones, so the two
+questions are reported separately and `verbatim` survives as a regression guard.
+Thresholds were re-baselined in the same commit — `all.recall` 0.55 → 0.48,
+`t0_readable.recall` 0.90 → 0.70 — with the new numbers in the commit message,
+which is the only honest way to lower a floor.
 
 ---
 

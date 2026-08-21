@@ -1,13 +1,13 @@
 # Golden set — construction and label policy
 
-70 hand-labeled messages. Small on purpose: every row is here to answer a
+78 hand-labeled messages. Small on purpose: every row is here to answer a
 specific question, and a set you can read end to end in five minutes is a set
 people actually audit.
 
 ## What this set is for
 
 It is **not** a representative sample of live chat. Real chat is ~95% benign
-trivia, and a set shaped like that would spend 66 of 70 rows confirming that
+trivia, and a set shaped like that would spend 74 of 78 rows confirming that
 "lol" is fine. This set is deliberately **adversarial-weighted**: roughly 60%
 benign (including 10 false-positive traps) and 40% positive, so that per-slice
 precision and recall are measurable at this size.
@@ -81,11 +81,41 @@ Calls that were genuinely close, recorded so they can be argued with:
 - **`t0_blind`** — an assertion about the *fixture*, not about any
   implementation: the meaning of this message is unreachable by Latin keyword
   matching. Used to report blind-spot exposure separately from ordinary misses.
-  16 of 70 rows.
+  16 of 78 rows.
+- **`paraphrase`** — a natural-chat rephrasing of a category the lexicon covers
+  in its canonical form. See below. 8 of 78 rows.
 - **`fp_trap`** — benign text containing hostile-looking tokens. A system that
   scores well overall while failing these is not usable in production.
 - **`tags`** — free-form. `voice-gate-repro` marks `g053`, the case that
   motivated this repo.
+
+## The paraphrase rows, and why they exist
+
+Rows `g001`-`g070` were written in the same sitting as T0's lexicon. That is a
+real methodological problem: four of them (`g022`, `g023`, `g026`, `g030`) are
+near-verbatim reproductions of the regexes that match them, so "T0 recall"
+was substantially the lexicon being read back to itself.
+
+Rather than delete the coverage, `g071`-`g078` were added: ordinary ways a
+viewer might phrase the *same categories*, written against the category
+definitions rather than the patterns. The two slices then separate cleanly:
+
+| slice | recall | reading |
+|---|---:|---|
+| `verbatim` | 95.8% | the lexicon matching what it was written against |
+| `paraphrase` | 14.3% | the lexicon generalizing — 1 positive in 7 |
+
+The gap is the finding. `verbatim` is a regression guard, not a capability
+claim, and the README says so where it reports the number.
+
+`g077` is the deliberate control: rephrased, but still containing a canonical
+token ("cash app"). It is caught. Without a row like it, a drop in the
+paraphrase slice could not be distinguished from the fixtures simply being
+harder than intended.
+
+`g078` is the paraphrase set's negative — rude but not actionable. A slice of
+positives only measures recall and would happily reward a classifier that
+flagged everything.
 
 ## Adding rows
 

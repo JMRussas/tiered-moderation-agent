@@ -72,4 +72,10 @@ class Label(BaseModel):
     # Marks deliberate false-positive traps: benign text that contains
     # hostile-looking tokens ("this game is trash", "I'd kill for that skin").
     fp_trap: bool = False
+    # Marks a row written as a natural-chat REPHRASING of a category the
+    # lexicon already covers in its canonical form. These exist because the
+    # golden set and the lexicon were originally authored together, which made
+    # `t0_readable` partly a restatement of the regexes rather than a
+    # measurement. Paraphrases are the generalization test.
+    paraphrase: bool = False
     tags: list[str] = Field(default_factory=list)

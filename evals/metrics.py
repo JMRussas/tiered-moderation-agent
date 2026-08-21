@@ -134,6 +134,10 @@ class Report:
     # object unchanged. That is the hard gate. This number is the residual
     # exposure to look at afterwards.
     combined_confident_misses: list[str] = field(default_factory=list)
+    # Lift from each repeat of the T1 tier. A single run of a stochastic tier
+    # is an anecdote; temperature=0 constrains sampling but is not a
+    # determinism guarantee across a threaded batch.
+    t1_lift_runs: list[float] = field(default_factory=list)
 
     def slice_by(self, name: str) -> Slice | None:
         return next((s for s in self.slices if s.name == name), None)
@@ -153,6 +157,11 @@ SLICES: dict[str, Callable[[Label], bool]] = {
     "t0_blind": lambda l: l.t0_blind,
     "t0_readable": lambda l: not l.t0_blind,
     "fp_traps": lambda l: l.fp_trap,
+    # Canonical wording vs. natural rephrasings of the same categories. The gap
+    # between these two is how much of `t0_readable` is generalization and how
+    # much is the lexicon reading itself back.
+    "verbatim": lambda l: not l.t0_blind and not l.paraphrase and not l.fp_trap,
+    "paraphrase": lambda l: l.paraphrase,
     "arabic_script": lambda l: l.script == "arabic",
     "arabizi": lambda l: l.lang == "ar-arabizi",
     "english": lambda l: l.lang == "en",

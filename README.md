@@ -27,31 +27,52 @@ every chat message
  [T2]  agent + tools, for the ambiguous few   (not built — see Status)
 ```
 
-## Measured, on 70 hand-labeled adversarial messages
+## Measured, on 78 hand-labeled adversarial messages
 
-Reproduce with `uv run evals/harness.py --t1`.
+Reproduce with `uv run evals/harness.py --t1 --repeat 3`.
 
 | | T0 alone | T0 + T1 |
 |---|---:|---:|
-| recall | 60.0% | **90.0%** |
-| precision | 96.0% | **97.3%** |
-| false positive rate | 3.3% | 3.3% |
-| wall clock | 2.1ms / 70 msgs | 40 model calls |
+| recall | 53.2% | **87.2%** |
+| precision | 96.2% | **97.6%** |
+| false positive rate | 3.2% | 3.2% |
+| wall clock | 1.6ms / 78 msgs | 47 model calls |
 
-**T1 lift: +30.0 recall points**, with precision going up rather than being
-traded away. That number is the entire justification for the tier existing. If
-it ever approaches zero, T1 should be deleted, not tuned.
+**T1 lift: +34.0 recall points** (3 runs, spread 0.0), with precision going up
+rather than being traded away. That number is the entire justification for the
+tier existing. If it ever approaches zero, T1 should be deleted, not tuned.
 
 Two routing numbers matter more than either column:
 
 | | value | meaning |
 |---|---:|---|
 | **safe miss rate** | **100%** | every positive T0 missed, it flagged `needs_llm`. Zero confident-and-wrong verdicts. |
-| escalation rate | 57.1% | share of traffic reaching a model. High here **because this set is adversarial-weighted** — not a production throughput claim. |
+| escalation rate | 60.3% | share of traffic reaching a model. High here **because this set is adversarial-weighted** — not a production throughput claim. |
 
 `safe_miss_rate` is gated at 1.0 in CI with no margin. A silent miss is a
 message the system is confidently wrong about, and downstream that reads as
 permission to act. See [docs/failure-modes.md](docs/failure-modes.md).
+
+### What these numbers do and don't show
+
+The golden set and T0's lexicon were originally written together, which made
+"T0 recall" partly a restatement of the regexes. Splitting the set exposes how
+much:
+
+| slice | n | recall | what it measures |
+|---|---:|---:|---|
+| `verbatim` | 45 | 95.8% | canonical wording — **largely self-referential**, treat as a regression guard, not a capability claim |
+| `paraphrase` | 8 | **14.3%** | natural rephrasings of the *same categories* |
+| `t0_blind` | 16 | 6.2% | Arabic script, Arabizi, sarcasm — unreachable by keywords by construction |
+
+T0 catches 1 in 7 ordinary rephrasings of categories it nominally covers. That
+is the honest capability number, and it is the strongest argument for the tier
+above it: T1 is what closes that gap.
+
+`verbatim` is gated (a lexicon edit breaking the forms it explicitly covers is
+a bug). `paraphrase` and `t0_blind` are deliberately **not** — a floor near the
+current value would just freeze it, and gating `t0_blind` would pressure
+someone into stuffing the lexicon instead of routing correctly.
 
 ## Why `needs_llm` is the important field
 

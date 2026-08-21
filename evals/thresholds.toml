@@ -6,16 +6,33 @@
 # meaning anything.
 
 [slice.all]
-precision = 0.90   # measured 0.960
-recall    = 0.55   # measured 0.600
-fpr       = 0.06   # measured 0.033  (max, not min)
+precision = 0.90   # measured 0.962
+recall    = 0.48   # measured 0.532
+fpr       = 0.06   # measured 0.032  (max, not min)
+
+[slice.verbatim]
+# Canonical wording -- the categories the lexicon was written against. This is
+# the regression guard: if a lexicon edit breaks the forms it explicitly
+# covers, that is a bug, not a discovery.
+recall    = 0.90   # measured 0.958
+precision = 0.90   # measured 1.000
 
 [slice.t0_readable]
-# The slice T0 is actually responsible for. Blind-slice recall is expected to
-# be near zero and is deliberately NOT gated -- that is a property of the
-# design, not a regression.
-recall    = 0.90   # measured 0.958
-precision = 0.90   # measured 0.958
+# Everything not structurally blind, canonical and rephrased together. The
+# floor is low because it INCLUDES the paraphrase set, where T0 is weak on
+# purpose and honestly.
+recall    = 0.70   # measured 0.774
+precision = 0.90   # measured 0.960
+
+# NOT GATED, deliberately:
+#   t0_blind   (6.2%)  -- T0 is a keyword matcher facing Arabic script. Failing
+#                         this slice is the design, not a regression. Gating it
+#                         would pressure someone into stuffing the lexicon
+#                         instead of routing correctly.
+#   paraphrase (14.3%) -- the generalization gap, and the honest headline of
+#                         this repo. A floor near the current value would just
+#                         freeze it. It is a number to improve, and T1 is the
+#                         thing that improves it.
 
 [routing]
 # Safety invariant, gated at 1.0 with NO margin. A silent miss is a message the
@@ -25,6 +42,6 @@ min_safe_miss_rate = 1.0    # measured 1.000
 
 # Cost guard. The whole architecture rests on most traffic never reaching a
 # model; if this creeps up, the thesis is quietly no longer true.
-# NOTE: this set is adversarial-weighted, so the value here is much higher than
+# NOTE: this set is adversarial-weighted, so the value here is far above
 # production traffic. Treat it as a regression tripwire, not a throughput claim.
-max_escalation_rate = 0.65  # measured 0.571
+max_escalation_rate = 0.70  # measured 0.603

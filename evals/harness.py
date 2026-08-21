@@ -102,6 +102,12 @@ def print_report(
         arrow = "+" if report.t1_lift >= 0 else ""
         print(f"\n  T1 LIFT            {arrow}{report.t1_lift * 100:.1f} recall points"
               f"   ({report.t1_evaluated} escalated messages re-scored)")
+        runs = report.t1_lift_runs
+        if len(runs) > 1:
+            lo, hi = min(runs) * 100, max(runs) * 100
+            mean = sum(runs) / len(runs) * 100
+            print(f"    across {len(runs)} runs   min {lo:.1f}   mean {mean:.1f}"
+                  f"   max {hi:.1f}   spread {hi - lo:.1f}")
     print()
 
 
@@ -184,12 +190,19 @@ def to_dict(report: Report) -> dict:
         },
         "combined_confident_misses": report.combined_confident_misses,
         "t1_lift": report.t1_lift,
+        "t1_lift_runs": report.t1_lift_runs,
     }
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--t1", action="store_true", help="also run the local LLM tier")
+    ap.add_argument(
+        "--repeat", type=int, default=1, metavar="N",
+        help="run the T1 tier N times and report min/mean/max lift. A single "
+             "run of a stochastic tier is an anecdote; temperature=0 is not a "
+             "determinism guarantee.",
+    )
     ap.add_argument("--json", type=Path, help="write machine-readable results here")
     ap.add_argument("--no-gate", action="store_true", help="report only, never fail")
     args = ap.parse_args()
@@ -207,12 +220,21 @@ def main() -> int:
         from tiermod import t1 as t1_mod
 
         escalated = [(l, v) for l, v in pairs if v.needs_llm]
-        print(f"  [T1] re-scoring {len(escalated)} escalated messages "
-              f"via {t1_mod.model_name()} ...", flush=True)
-        # Pairs, not bare labels: T1 must know what to degrade back to.
-        t1_pairs = t1_mod.score_batch(escalated)
+        lifts = []
+        for run in range(max(1, args.repeat)):
+            print(f"  [T1] run {run + 1}/{args.repeat}: re-scoring "
+                  f"{len(escalated)} escalated messages via "
+                  f"{t1_mod.model_name()} ...", flush=True)
+            # Pairs, not bare labels: T1 must know what to degrade back to.
+            t1_pairs = t1_mod.score_batch(escalated)
+            lift = evaluate(pairs, t1_pairs=t1_pairs).t1_lift
+            if lift is not None:
+                lifts.append(lift)
+
 
     report = evaluate(pairs, t1_pairs=t1_pairs)
+    if args.t1:
+        report.t1_lift_runs = lifts
     print_report(report, golden, elapsed_ms=elapsed_ms, t1=args.t1)
 
     if args.json:
