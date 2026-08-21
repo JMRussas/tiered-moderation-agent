@@ -1,0 +1,28 @@
+name: eval
+
+on: [push, pull_request]
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      # T0 only. No Ollama in CI, and that is the point: the deterministic tier
+      # and every routing invariant are verifiable with no model at all.
+      # `safe_miss_rate` is gated at 1.0 here -- a silent miss fails the build.
+      - name: Eval gate
+        run: uv run evals/harness.py --json eval-results.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: eval-results.json

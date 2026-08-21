@@ -1,0 +1,30 @@
+# CI gates. Values are the measured baseline minus a small margin, so ordinary
+# noise does not fail the build but a real regression does.
+#
+# Re-baseline deliberately, in its own commit, with the new numbers in the
+# message. Quietly lowering a floor to make CI green is how an eval suite stops
+# meaning anything.
+
+[slice.all]
+precision = 0.90   # measured 0.960
+recall    = 0.55   # measured 0.600
+fpr       = 0.06   # measured 0.033  (max, not min)
+
+[slice.t0_readable]
+# The slice T0 is actually responsible for. Blind-slice recall is expected to
+# be near zero and is deliberately NOT gated -- that is a property of the
+# design, not a regression.
+recall    = 0.90   # measured 0.958
+precision = 0.90   # measured 0.958
+
+[routing]
+# Safety invariant, gated at 1.0 with NO margin. A silent miss is a message the
+# system is confidently wrong about, which is exactly what a downstream voice
+# gate reads as permission to speak. Zero is the only acceptable number.
+min_safe_miss_rate = 1.0    # measured 1.000
+
+# Cost guard. The whole architecture rests on most traffic never reaching a
+# model; if this creeps up, the thesis is quietly no longer true.
+# NOTE: this set is adversarial-weighted, so the value here is much higher than
+# production traffic. Treat it as a regression tripwire, not a throughput claim.
+max_escalation_rate = 0.65  # measured 0.571
