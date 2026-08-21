@@ -33,7 +33,7 @@ def test_golden_is_valid_jsonl():
             json.loads(line)  # raises with the line number in context
 
 
-def test_golden_has_both_classes_in_every_gated_slice():
+def test_gated_slice_has_both_classes():
     """A slice with no positives reports recall=None and silently passes any
     threshold. Guard against a fixture edit hollowing out a gate."""
     golden = load_golden()
@@ -74,7 +74,10 @@ def test_safe_miss_rate_definition():
     assert r.escalation_rate == pytest.approx(0.4)
 
 
-def test_safe_miss_rate_is_one_when_nothing_missed():
+def test_safe_miss_rate_is_undefined_when_nothing_was_missed():
+    """No misses means the ratio has no denominator. `None`, not 1.0 -- a
+    perfect-looking 1.0 on an empty run would mask a harness that scored
+    nothing at all."""
     assert Routing(total=5, escalated=1).safe_miss_rate is None
 
 
@@ -106,3 +109,54 @@ def test_t1_recovery_is_credited_only_where_it_ran():
     assert combined is not None
     assert combined.n == len(golden)
     assert report.t1_evaluated == 1
+
+
+# --- Gate configuration ---------------------------------------------------
+# thresholds.toml is the only thing standing between a regression and a green
+# build. A typo in it used to be a silent no-op.
+
+def _report():
+    golden = load_golden()
+    return evaluate([(l, t0.score(l.text)) for l in golden])
+
+
+def _with_thresholds(tmp_path, monkeypatch, *lines: str):
+    import harness
+
+    bad = tmp_path / "thresholds.toml"
+    bad.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(harness, "THRESHOLDS", bad)
+    return harness
+
+
+def test_unknown_metric_in_thresholds_raises(tmp_path, monkeypatch):
+    """`recal` instead of `recall` used to gate nothing and pass."""
+    harness = _with_thresholds(tmp_path, monkeypatch, "[slice.all]", "recal = 0.9")
+
+    with pytest.raises(ValueError, match="unknown metric"):
+        harness.check_thresholds(_report())
+
+
+def test_unknown_slice_in_thresholds_raises(tmp_path, monkeypatch):
+    harness = _with_thresholds(
+        tmp_path, monkeypatch, "[slice.t0_readible]", "recall = 0.9"
+    )
+
+    with pytest.raises(ValueError, match="unknown slice"):
+        harness.check_thresholds(_report())
+
+
+def test_unknown_routing_key_raises(tmp_path, monkeypatch):
+    harness = _with_thresholds(
+        tmp_path, monkeypatch, "[routing]", "min_safe_rate = 1.0"
+    )
+
+    with pytest.raises(ValueError, match="unknown key"):
+        harness.check_thresholds(_report())
+
+
+def test_shipped_thresholds_are_valid():
+    """The committed gate config must itself pass validation."""
+    import harness
+
+    assert harness.check_thresholds(_report()) == []

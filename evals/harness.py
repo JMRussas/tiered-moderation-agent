@@ -21,12 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "evals"))
 
-from metrics import Report, evaluate  # noqa: E402
+from metrics import SLICES, Report, evaluate  # noqa: E402
 from tiermod import t0  # noqa: E402
 from tiermod.schema import Label, Verdict  # noqa: E402
 
 GOLDEN = ROOT / "evals" / "golden" / "messages.jsonl"
 THRESHOLDS = ROOT / "evals" / "thresholds.toml"
+
+VALID_METRICS = {"precision", "recall", "f1", "fpr"}
+VALID_ROUTING = {"max_escalation_rate", "min_safe_miss_rate"}
 
 
 def load_golden(path: Path = GOLDEN) -> list[Label]:
@@ -51,11 +54,13 @@ def _bar(x: float | None, width: int = 12) -> str:
     return "#" * filled + "." * (width - filled)
 
 
-def print_report(report: Report, *, elapsed_ms: float, t1: bool) -> None:
+def print_report(
+    report: Report, golden: list[Label], *, elapsed_ms: float, t1: bool
+) -> None:
     print()
     print("=" * 74)
-    print(f"  TIERED MODERATION EVAL   ·   {report.routing.total} messages"
-          f"   ·   T0 {elapsed_ms:.1f}ms total")
+    print(f"  TIERED MODERATION EVAL   |   {report.routing.total} messages"
+          f"   |   T0 {elapsed_ms:.1f}ms total")
     print("=" * 74)
 
     print(f"\n  {'slice':<16}{'n':>4}  {'precision':>10}{'recall':>9}{'F1':>8}{'FPR':>8}")
@@ -69,7 +74,7 @@ def print_report(report: Report, *, elapsed_ms: float, t1: bool) -> None:
         )
 
     r = report.routing
-    print("\n  ROUTING — the two numbers the architecture rests on")
+    print("\n  ROUTING - the two numbers the architecture rests on")
     print("  " + "-" * 70)
     print(f"    escalation rate    {_pct(r.escalation_rate)}  {_bar(r.escalation_rate)}"
           f"   {r.escalated}/{r.total} sent to a model")
@@ -77,15 +82,21 @@ def print_report(report: Report, *, elapsed_ms: float, t1: bool) -> None:
           f"   {r.missed_escalated}/{r.missed_escalated + r.missed_silent} misses were flagged uncertain")
 
     if r.silent_ids:
-        print(f"\n  SILENT MISSES ({len(r.silent_ids)}) — wrong AND confident.")
+        print(f"\n  SILENT MISSES ({len(r.silent_ids)}) - wrong AND confident.")
         print("  These reach a downstream gate as `toxic=False, needs_llm=False`.")
         print("  " + "-" * 70)
-        golden = {l.id: l for l in load_golden()}
+        by_id = {l.id: l for l in golden}
         for mid in r.silent_ids:
-            lab = golden[mid]
+            lab = by_id[mid]
             print(f"    {mid}  [{lab.lang:>10}] {lab.text[:44]!r}")
             if lab.note:
                 print(f"           {lab.note[:60]}")
+
+    if report.combined_confident_misses:
+        n = len(report.combined_confident_misses)
+        print(f"\n  CONFIDENT MISSES AFTER T1 ({n})"
+              " - residual exposure, reported not gated")
+        print("    " + ", ".join(report.combined_confident_misses))
 
     if t1 and report.t1_lift is not None:
         arrow = "+" if report.t1_lift >= 0 else ""
@@ -101,6 +112,29 @@ def check_thresholds(report: Report) -> list[str]:
         return []
     cfg = tomllib.loads(THRESHOLDS.read_text(encoding="utf-8"))
     failures: list[str] = []
+
+    # A typo in this file used to be a silent no-op -- `getattr(..., None)` for
+    # an unknown metric, `continue` for an unknown slice. Both made CI pass
+    # having gated nothing, which is the worst possible behaviour for the file
+    # whose only job is gating. Unknown keys are now hard errors.
+    for name, rules in cfg.get("slice", {}).items():
+        if name not in SLICES:
+            raise ValueError(
+                f"thresholds.toml: unknown slice [slice.{name}]. "
+                f"Known: {', '.join(sorted(SLICES))}"
+            )
+        for metric in rules:
+            if metric not in VALID_METRICS:
+                raise ValueError(
+                    f"thresholds.toml: unknown metric '{metric}' under [slice.{name}]. "
+                    f"Known: {', '.join(sorted(VALID_METRICS))}"
+                )
+    for key in cfg.get("routing", {}):
+        if key not in VALID_ROUTING:
+            raise ValueError(
+                f"thresholds.toml: unknown key '{key}' under [routing]. "
+                f"Known: {', '.join(sorted(VALID_ROUTING))}"
+            )
 
     for name, rules in cfg.get("slice", {}).items():
         s = report.slice_by(name)
@@ -148,6 +182,7 @@ def to_dict(report: Report) -> dict:
             "safe_miss_rate": report.routing.safe_miss_rate,
             "silent_misses": report.routing.silent_ids,
         },
+        "combined_confident_misses": report.combined_confident_misses,
         "t1_lift": report.t1_lift,
     }
 
@@ -174,10 +209,11 @@ def main() -> int:
         escalated = [(l, v) for l, v in pairs if v.needs_llm]
         print(f"  [T1] re-scoring {len(escalated)} escalated messages "
               f"via {t1_mod.model_name()} ...", flush=True)
-        t1_pairs = t1_mod.score_batch([l for l, _ in escalated])
+        # Pairs, not bare labels: T1 must know what to degrade back to.
+        t1_pairs = t1_mod.score_batch(escalated)
 
     report = evaluate(pairs, t1_pairs=t1_pairs)
-    print_report(report, elapsed_ms=elapsed_ms, t1=args.t1)
+    print_report(report, golden, elapsed_ms=elapsed_ms, t1=args.t1)
 
     if args.json:
         args.json.write_text(json.dumps(to_dict(report), indent=2), encoding="utf-8")

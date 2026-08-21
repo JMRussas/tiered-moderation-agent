@@ -147,6 +147,61 @@ not a lower floor.
 
 ---
 
+## FM-3 — The degradation contract was documented, not implemented
+
+**Status:** found in code review, after the first commit. Fixed. Regression
+tests in `tests/test_t1_degradation.py`.
+
+The same shape as FM-1 and FM-2, this time in the code written to prevent them.
+
+`t1.score_one(label, fallback=None)` took its degradation target as an
+**optional** parameter. `score_batch` then called it through
+`ThreadPoolExecutor.map` with a single iterable, so `fallback` was always
+`None` and every failure fell through to a blank `Verdict()` — not to T0's.
+
+With Ollama unreachable, on `g053`:
+
+```
+T0      : toxic=False  needs_llm=True   question=True
+T1(down): toxic=False  needs_llm=False  question=False
+```
+
+`needs_llm` went **True → False**. A dead model server silently converted "I
+could not read this" into "this is clean", which is precisely what FM-1 says
+must never happen. `question` was destroyed too — upstream that is a 40-point
+signal on the response board, so the failure also changes who the host talks to.
+
+Nothing caught it. `Routing` measures T0 alone and T0 was honest, so
+`safe_miss_rate` correctly reported 100%; there was simply no metric covering
+the combined tier. The README asserted the contract as a headline property.
+
+### The fix
+
+Make the mistake unwritable rather than merely fixed:
+
+```python
+def score_one(label: Label, base: Verdict) -> Verdict:          # no default
+def score_batch(pairs: Sequence[tuple[Label, Verdict]]) -> ...  # pairs, not labels
+```
+
+The degradation target now travels with each message and cannot be dropped at
+the call site. `test_fallback_has_no_default` asserts the signature, so a later
+refactor cannot reintroduce the optional parameter quietly.
+
+### What it cost
+
+Nothing measurable — T0 metrics are byte-identical before and after, which is
+the expected result for a pure correctness change and was used to confirm it.
+
+A second, weaker check was added alongside: `combined_confident_misses` reports
+positives still missed after T1 that no longer carry `needs_llm`. It is
+**reported, not gated**, because it mixes an unavoidable condition (T1 ran and
+was wrong) with a defect (T1 failed and cleared the flag). Gating it at zero
+would demand perfect T1 recall, so the gate would sit red and get switched off.
+The defect half is caught precisely, and without a model, by the unit tests.
+
+---
+
 ## What the tiering buys, measured
 
 The point of tolerating T0's blindness is that T1 recovers it. On the golden

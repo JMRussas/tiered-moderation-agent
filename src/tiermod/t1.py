@@ -105,6 +105,10 @@ def _get_llm():
         num_ctx=NUM_CTX,
         reasoning=False,  # thinking blocks burn context and add nothing here
         temperature=0,
+        # ChatOllama exposes no `timeout` field of its own; the value has to
+        # reach the underlying httpx client. Without this a hung Ollama pins a
+        # worker forever and the bounded pool drains to zero.
+        client_kwargs={"timeout": TIMEOUT_S},
         # Ollama publishes no model profile, so LangChain cannot size a context
         # budget on its own. Declare the window we actually serve.
         profile={"max_input_tokens": NUM_CTX - 512},
@@ -112,9 +116,17 @@ def _get_llm():
     return _llm
 
 
-def score_one(label: Label, fallback: Verdict | None = None) -> Verdict:
-    """Re-score one escalated message. Never raises."""
-    base = fallback or Verdict(tier="T0")
+def score_one(label: Label, base: Verdict) -> Verdict:
+    """Re-score one escalated message. Never raises.
+
+    `base` is REQUIRED and has no default, deliberately. An earlier version made
+    it optional, and `score_batch` then called this through `pool.map` with one
+    iterable -- so every failure degraded to a blank `Verdict()` instead of to
+    T0's. That silently cleared `needs_llm`, converting "I could not read this"
+    into "this is clean": the exact failure this project exists to prevent, in
+    the project's own code. Keeping the parameter mandatory makes that
+    unwritable rather than merely fixed.
+    """
     try:
         result: T1Result = _get_llm().invoke(
             [("system", SYSTEM), ("human", f"<message>{label.text}</message>")]
@@ -136,10 +148,18 @@ def score_one(label: Label, fallback: Verdict | None = None) -> Verdict:
     )
 
 
-def score_batch(labels: Sequence[Label]) -> list[tuple[Label, Verdict]]:
-    """Score many, bounded. Order of the input is preserved."""
-    if not labels:
+def score_batch(
+    pairs: Sequence[tuple[Label, Verdict]],
+) -> list[tuple[Label, Verdict]]:
+    """Score many, bounded. Order of the input is preserved.
+
+    Takes (label, T0 verdict) pairs rather than bare labels so the degradation
+    target travels with each message and cannot be forgotten at the call site.
+    """
+    if not pairs:
         return []
+    labels = [l for l, _ in pairs]
+    bases = [v for _, v in pairs]
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        verdicts = list(pool.map(score_one, labels))
+        verdicts = list(pool.map(score_one, labels, bases))
     return list(zip(labels, verdicts))

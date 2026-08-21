@@ -41,6 +41,13 @@ class Verdict(BaseModel):
     lang: str | None = None
     translation: str | None = None
 
+    # Why this verdict fired, in moderator-readable terms ("off-platform
+    # payment", "threat"). The whole product is advisory -- a human decides and
+    # can mark the call wrong -- and an advisory a moderator cannot audit is
+    # one they learn to ignore. T0 knows the reason at match time; dropping it
+    # there means no later tier can reconstruct it.
+    reasons: list[str] = Field(default_factory=list)
+
 
 class Label(BaseModel):
     """Ground truth for one golden-set message.

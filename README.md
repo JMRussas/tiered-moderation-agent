@@ -73,7 +73,7 @@ afternoon.
 
 ```bash
 uv sync
-uv run pytest                        # 34 tests, no network
+uv run pytest                        # unit tests, no network
 uv run evals/harness.py              # T0 only — no model needed
 ```
 

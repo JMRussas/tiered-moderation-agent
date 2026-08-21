@@ -20,6 +20,7 @@ a T0 verdict without consulting ``needs_llm`` has misread this module -- see
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -143,11 +144,21 @@ _BLOCKLIST: set[str] | None = None
 _DEFAULT_BLOCKLIST = Path(__file__).resolve().parents[2] / "data" / "blocklist.json"
 
 
+def _configured_path() -> Path:
+    """BLOCKLIST_PATH wins over the committed placeholder file.
+
+    Deployments point this at a private, moderator-maintained list. It is read
+    here rather than documented-and-ignored, which is what it was.
+    """
+    env = os.getenv("BLOCKLIST_PATH", "").strip()
+    return Path(env) if env else _DEFAULT_BLOCKLIST
+
+
 def load_blocklist(path: str | Path | None = None) -> set[str]:
     global _BLOCKLIST
     if path is None and _BLOCKLIST is not None:
         return _BLOCKLIST
-    p = Path(path) if path else _DEFAULT_BLOCKLIST
+    p = Path(path) if path else _configured_path()
     try:
         terms = {str(t).lower() for t in json.loads(p.read_text(encoding="utf-8"))}
     except (OSError, ValueError):
@@ -181,15 +192,21 @@ def score(
     # --- Toxicity ---------------------------------------------------------
     # NEGATIVE alone is not enough: it needs a second-person target, or every
     # "this game is trash" gets flagged.
-    toxic = bool(
-        THREAT.search(t)
-        or SEXUAL.search(t)
-        or _blocklist_hit(low, terms)
-        or (NEGATIVE.search(t) and SECOND_PERSON.search(t))
-    )
+    reasons: list[str] = []
+    if THREAT.search(t):
+        reasons.append("threat")
+    if SEXUAL.search(t):
+        reasons.append("sexual content directed at a person")
+    if _blocklist_hit(low, terms):
+        reasons.append("blocklist match")
+    if NEGATIVE.search(t) and SECOND_PERSON.search(t):
+        reasons.append("insult with a second-person target")
+    toxic = bool(reasons)
 
     # --- Scam -------------------------------------------------------------
-    scam = any(rx.search(t) for rx, _ in SCAM)
+    scam_reasons = [why for rx, why in SCAM if rx.search(t)]
+    reasons.extend(scam_reasons)
+    scam = bool(scam_reasons)
 
     # --- Sentiment --------------------------------------------------------
     pos = bool(POSITIVE.search(t))
@@ -242,6 +259,7 @@ def score(
     return Verdict(
         toxic=toxic,
         scam=scam,
+        reasons=reasons,
         question=bool(QUESTION.search(t)),
         friendliness=friendliness,
         needs_llm=needs_llm,

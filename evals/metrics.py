@@ -120,6 +120,20 @@ class Report:
     # recall(T0 then T1) minus recall(T0), on `flagged`. None when T1 was off.
     t1_lift: float | None = None
     t1_evaluated: int = 0
+    # Positives still missed after T1 that no longer carry needs_llm --
+    # "confident and wrong" at the end of the pipeline.
+    #
+    # REPORTED, NOT GATED, and the distinction matters. This bucket mixes two
+    # different things: T1 ran and got it wrong (unavoidable -- no classifier
+    # has perfect recall), and T1 failed but cleared needs_llm anyway (a defect,
+    # and the one this project is about). Gating it at zero would demand 100%
+    # T1 recall, so the gate would be permanently red and get switched off.
+    #
+    # The defect half is caught precisely, and without a model, by
+    # tests/test_t1_degradation.py: a failed T1 call must return its T0 base
+    # object unchanged. That is the hard gate. This number is the residual
+    # exposure to look at afterwards.
+    combined_confident_misses: list[str] = field(default_factory=list)
 
     def slice_by(self, name: str) -> Slice | None:
         return next((s for s in self.slices if s.name == name), None)
@@ -194,5 +208,11 @@ def evaluate(
         report.t1_evaluated = len(t1_pairs)
         after.name = "all+t1"
         report.slices.append(after)
+
+        for label, verdict in combined:
+            actual = label.toxic or label.scam
+            predicted = verdict.toxic or verdict.scam
+            if actual and not predicted and not verdict.needs_llm:
+                report.combined_confident_misses.append(label.id)
 
     return report

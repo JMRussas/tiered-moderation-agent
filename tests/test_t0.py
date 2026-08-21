@@ -132,3 +132,36 @@ def test_empty_input_is_safe():
     for text in ("", "   ", None):
         v = t0.score(text)
         assert v.toxic is False and v.scam is False and v.needs_llm is False
+
+
+# --- Configuration --------------------------------------------------------
+
+def test_blocklist_path_env_is_honoured(tmp_path, monkeypatch):
+    """BLOCKLIST_PATH was documented in .env.example and read nowhere. A
+    deployment pointing at a private list would have silently kept using the
+    committed placeholders."""
+    real = tmp_path / "blocklist.json"
+    real.write_text('["zzcustomterm"]', encoding="utf-8")
+    monkeypatch.setenv("BLOCKLIST_PATH", str(real))
+    monkeypatch.setattr(t0, "_BLOCKLIST", None)  # bypass the process-wide cache
+
+    assert t0.load_blocklist() == {"zzcustomterm"}
+
+
+def test_missing_blocklist_file_is_not_fatal(tmp_path, monkeypatch):
+    """A bad path must degrade to no blocklist, not crash the pipeline on
+    every message."""
+    monkeypatch.setenv("BLOCKLIST_PATH", str(tmp_path / "nope.json"))
+    monkeypatch.setattr(t0, "_BLOCKLIST", None)
+
+    assert t0.load_blocklist() == set()
+
+
+# --- Explainability -------------------------------------------------------
+
+def test_verdict_carries_a_reason():
+    """Advisories a moderator cannot audit are advisories they learn to
+    ignore. The reason is known at match time and used to be discarded."""
+    assert "off-platform payment" in t0.score("cashapp me 50").reasons
+    assert "threat" in t0.score("kys").reasons
+    assert t0.score("yooo this stream is amazing").reasons == []
