@@ -20,13 +20,62 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from threading import BoundedSemaphore, Lock
 from typing import Literal, Sequence
 
 from pydantic import BaseModel, Field, model_validator
 
 from .schema import Message, Verdict
+
+# Why a call did or did not produce a T1 verdict. Every non-"ok" status
+# returns the T0 base unchanged; the status exists so an evaluation or a
+# consumer can tell admission control apart from a broken model without
+# reading logs.
+#
+#   ok          validated model result
+#   capacity    the process-wide inference limit rejected the call
+#   transport   the server was unreachable or the connection timed out
+#   validation  the model answered, but not in the required shape
+#   model       the server returned an error, or an unclassified exception
+Status = Literal["ok", "capacity", "transport", "validation", "model"]
+STATUSES: tuple[Status, ...] = ("ok", "capacity", "transport", "validation", "model")
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """A T1 attempt: the verdict to use plus how it was obtained."""
+
+    verdict: Verdict
+    status: Status
+    latency_ms: float
+    # Exception class name only; messages may contain private chat.
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "ok"
+
+
+# Matched against the exception's MRO by class name, so the llm extra need not
+# be importable to classify an error. Transport is checked first: an httpx
+# timeout is an HTTPError, never a ValueError.
+_TRANSPORT = {"HTTPError", "OSError", "ConnectionError", "TimeoutError"}
+# pydantic ValidationError, OutputParserException, and JSONDecodeError are
+# all ValueErrors: the model produced something, and it did not validate.
+_VALIDATION = {"ValueError"}
+
+
+def _classify(exc: BaseException) -> Status:
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if names & _TRANSPORT:
+        return "transport"
+    if names & _VALIDATION:
+        return "validation"
+    return "model"
+
 
 MODEL = os.getenv("T1_MODEL", "ollama:qwen3.5")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -44,6 +93,23 @@ logger = logging.getLogger(__name__)
 
 def model_name() -> str:
     return MODEL
+
+
+def inference_settings() -> dict:
+    """The settings that shape a model answer; recorded in eval provenance.
+    Keep in sync with `_create_llm`."""
+    return {
+        "model": MODEL,
+        "server_url": OLLAMA_URL,
+        "num_ctx": NUM_CTX,
+        "num_predict": 512,
+        "temperature": 0,
+        "reasoning": False,
+        "structured_output": "json_schema",
+        "concurrency": CONCURRENCY,
+        "timeout_s": TIMEOUT_S,
+        "timeout_kind": "http-inactivity",
+    }
 
 
 class T1Result(BaseModel):
@@ -127,15 +193,16 @@ def _create_llm():
     ).with_structured_output(T1Result, method="json_schema")
 
 
-def score_one(message: Message, base: Verdict) -> Verdict:
+def classify(message: Message, base: Verdict) -> Outcome:
     """Attempt inference once, preserving the exact base on failure or overload.
 
     The process-wide limit is nonblocking: saturated callers retain uncertainty
     instead of accumulating an unbounded waiting queue inside this function.
     """
+    start = time.perf_counter()
     if not _slots.acquire(blocking=False):
         logger.warning("T1 capacity exhausted; retaining T0 verdict")
-        return base
+        return Outcome(base, "capacity", _elapsed_ms(start))
     try:
         raw = _get_llm().invoke(
             [("system", SYSTEM), ("human", f"<message>{message.text}</message>")]
@@ -145,7 +212,7 @@ def score_one(message: Message, base: Verdict) -> Verdict:
         # hit. A message can be both toxic and escalated (non-Latin script,
         # Arabizi, translate_mode), and the model must not clear it.
         reasons = base.reasons + [r for r in result.reasons if r not in base.reasons]
-        return Verdict(
+        verdict = Verdict(
             toxic=base.toxic or result.toxic,
             scam=base.scam or result.scam,
             question=base.question,
@@ -157,18 +224,24 @@ def score_one(message: Message, base: Verdict) -> Verdict:
             translation=result.translation,
             reasons=reasons,
         )
+        return Outcome(verdict, "ok", _elapsed_ms(start))
     except Exception as exc:
         # Exception messages may contain private chat. Record only the type.
-        logger.warning("T1 failed (%s); retaining T0 verdict", type(exc).__name__)
-        return base
+        status = _classify(exc)
+        logger.warning("T1 failed (%s: %s); retaining T0 verdict", status, type(exc).__name__)
+        return Outcome(base, status, _elapsed_ms(start), error=type(exc).__name__)
     finally:
         _slots.release()
 
 
-def score_batch(
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000
+
+
+def classify_batch(
     pairs: Sequence[tuple[Message, Verdict]],
-) -> list[tuple[Message, Verdict]]:
-    """Score a finite batch in input order, subject to the shared inference limit.
+) -> list[tuple[Message, Outcome]]:
+    """Classify a finite batch in input order, subject to the shared inference limit.
 
     The batch is materialized; callers must bound batch size. This is not a
     streaming queue or admission controller across multiple processes.
@@ -177,5 +250,17 @@ def score_batch(
         return []
     messages, bases = zip(*pairs)
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        verdicts = list(pool.map(score_one, messages, bases))
-    return list(zip(messages, verdicts))
+        outcomes = list(pool.map(classify, messages, bases))
+    return list(zip(messages, outcomes))
+
+
+def score_one(message: Message, base: Verdict) -> Verdict:
+    """`classify` for callers that only need the verdict."""
+    return classify(message, base).verdict
+
+
+def score_batch(
+    pairs: Sequence[tuple[Message, Verdict]],
+) -> list[tuple[Message, Verdict]]:
+    """`classify_batch` for callers that only need the verdicts."""
+    return [(m, o.verdict) for m, o in classify_batch(pairs)]

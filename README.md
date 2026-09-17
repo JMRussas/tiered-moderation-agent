@@ -54,7 +54,7 @@ For T1, with Ollama running:
 ```bash
 uv sync --locked --extra llm
 ollama pull qwen3.5
-uv run --extra llm evals/harness.py --t1 --repeat 3 --json docs/eval-results.json
+uv run --extra llm evals/harness.py --t1 --repeat 3 --json evals/results/<date>.json
 ```
 
 Every repeat must meet combined precision/recall/FPR, recall-lift, and successful
@@ -65,8 +65,13 @@ and invalid datasets remain errors.
 
 CI runs unit tests, the wheel check, and the T0 gate. It **does not run Ollama**.
 Run the command above after changes to prompts, model versions, or inference
-configuration and retain its JSON report. See [validation](docs/validation.md)
-for the most recent checks and model provenance.
+configuration and retain its artifact. `--json` writes a versioned report with
+collected provenance (revision, input hashes, model digest, inference settings,
+hardware), every repeat's metrics and gate decision, and every message's route,
+status, and latency; nothing in it is typed by hand. Compare two runs with
+`uv run evals/compare.py a.json b.json`. See
+[evals/results/README.md](evals/results/README.md) for the schema and
+[validation](docs/validation.md) for the most recent checks.
 
 ## Measurements and limits
 
@@ -128,6 +133,9 @@ flags and reasons whatever the model answers. T1
 requires moderator-readable reasons for flagged results. It makes one attempt;
 invalid output or an inference exception returns the original T0 object and
 logs the failure type without logging chat text. There are no automatic retries.
+`t1.classify` returns the same verdict with an `Outcome` status (`ok`,
+`capacity`, `transport`, `validation`, `model`), latency, and the exception
+class name, so a consumer can tell admission control from a broken model.
 
 `T1_CONCURRENCY` bounds active calls across batches and direct calls in one
 process. Saturation immediately returns the original verdict. Batches are

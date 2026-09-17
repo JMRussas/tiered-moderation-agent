@@ -2,7 +2,7 @@
 
     uv run evals/harness.py              # T0 only -- no model, no network
     uv run evals/harness.py --t1         # adds the local LLM tier
-    uv run evals/harness.py --json out.json
+    uv run evals/harness.py --json out.json   # versioned artifact, see evals/results/README.md
 
 Exits non-zero when a threshold in evals/thresholds.toml is breached, so a
 T0 regressions fail CI and --t1 also gates model quality on every repeat.
@@ -23,6 +23,10 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "evals"))
 
 from metrics import SLICES, Report, evaluate  # noqa: E402
+from report import (  # noqa: E402
+    Artifact, Repeat, T0Pass, T1Accounting, collect_provenance, message_outcome,
+    metrics_to_dict, summarize_latency,
+)
 from tiermod import t0  # noqa: E402
 from tiermod.schema import Label, Message, Verdict  # noqa: E402
 
@@ -60,7 +64,8 @@ def _bar(x: float | None, width: int = 12) -> str:
 
 
 def print_report(
-    report: Report, golden: list[Label], *, elapsed_ms: float, t1: bool
+    report: Report, golden: list[Label], *, elapsed_ms: float, t1: bool,
+    repeats: list[Repeat] = (),
 ) -> None:
     print()
     print("=" * 74)
@@ -113,6 +118,16 @@ def print_report(
             mean = sum(runs) / len(runs) * 100
             print(f"    across {len(runs)} runs   min {lo:.1f}   mean {mean:.1f}"
                   f"   max {hi:.1f}   spread {hi - lo:.1f}")
+    if repeats:
+        print("\n  T1 ACCOUNTING      every escalated message ends in exactly one status")
+        print("  " + "-" * 70)
+        for rep in repeats:
+            counts = " ".join(f"{k}={v}" for k, v in rep.t1.status_counts.items() if v)
+            lat = rep.t1.latency_ms
+            timing = (f"p50 {lat.p50_ms:.0f}ms  p95 {lat.p95_ms:.0f}ms  max {lat.max_ms:.0f}ms"
+                      if lat.n else "no attempts")
+            gate = "pass" if not rep.gate_failures else f"FAIL x{len(rep.gate_failures)}"
+            print(f"    run {rep.index}  {gate:<8} {counts:<40} {timing}")
     print()
 
 
@@ -195,32 +210,51 @@ def check_thresholds(report: Report, *, require_t1: bool = False) -> list[str]:
     return failures
 
 
-def to_dict(report: Report) -> dict:
+def _summary(report: Report, repeats: list[Repeat]) -> dict:
+    def rates(name: str) -> dict | None:
+        s = report.slice_by(name)
+        if s is None:
+            return None
+        return {"n": s.n, "precision": s.flagged.precision, "recall": s.flagged.recall,
+                "fpr": s.flagged.fpr}
+
     return {
-        "slices": {
-            s.name: {
-                "n": s.n,
-                "precision": s.flagged.precision,
-                "recall": s.flagged.recall,
-                "f1": s.flagged.f1,
-                "fpr": s.flagged.fpr,
-                "toxic": {"precision": s.toxic.precision, "recall": s.toxic.recall},
-                "scam": {"precision": s.scam.precision, "recall": s.scam.recall},
-            }
-            for s in report.slices
-        },
-        "routing": {
-            "escalation_rate": report.routing.escalation_rate,
-            "safe_miss_rate": report.routing.safe_miss_rate,
-            "silent_misses": report.routing.silent_ids,
-        },
-        "combined_confident_misses": report.combined_confident_misses,
-        "t1_requested": report.t1_requested,
-        "t1_evaluated": report.t1_evaluated,
-        "t1_successful": report.t1_successful,
+        "escalation_rate": report.routing.escalation_rate,
+        "safe_miss_rate": report.routing.safe_miss_rate,
+        "t0": rates("all"),
+        "final": rates("all+t1"),
         "t1_lift": report.t1_lift,
-        "t1_lift_runs": report.t1_lift_runs,
+        "t1_lift_runs": list(report.t1_lift_runs),
+        "t1_status_counts": repeats[-1].t1.status_counts if repeats else None,
+        "combined_confident_misses": list(report.combined_confident_misses),
     }
+
+
+def _repeat(index: int, pairs, results, run_report: Report, failures: list[str]) -> Repeat:
+    """Per-message and per-status accounting for one T1 repeat."""
+    from tiermod.t1 import STATUSES
+
+    by_id = {m.id: o for m, o in results}
+    messages = []
+    for label, t0_verdict in pairs:
+        outcome = by_id.get(label.id)
+        if outcome is None:
+            messages.append(message_outcome(label, t0_verdict, t0_verdict))
+        else:
+            messages.append(message_outcome(
+                label, t0_verdict, outcome.verdict, status=outcome.status,
+                latency_ms=outcome.latency_ms, error=outcome.error))
+    counts = {status: 0 for status in STATUSES}
+    for _, outcome in results:
+        counts[outcome.status] += 1
+    accounting = T1Accounting(
+        evaluated=len(results),
+        status_counts=counts,
+        latency_ms=summarize_latency([o.latency_ms for _, o in results]),
+        ok_latency_ms=summarize_latency([o.latency_ms for _, o in results if o.succeeded]),
+    )
+    return Repeat(index=index, metrics=metrics_to_dict(run_report), gate_failures=failures,
+                  t1=accounting, messages=messages)
 
 
 def main() -> int:
@@ -232,7 +266,7 @@ def main() -> int:
              "run of a stochastic tier is an anecdote; temperature=0 is not a "
              "determinism guarantee.",
     )
-    ap.add_argument("--json", type=Path, help="write machine-readable results here")
+    ap.add_argument("--json", type=Path, help="write the versioned evaluation artifact here")
     ap.add_argument("--no-gate", action="store_true", help="report only, never fail")
     args = ap.parse_args()
 
@@ -245,39 +279,59 @@ def main() -> int:
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     pairs = list(zip(golden, verdicts))
+    t0_report = evaluate(pairs)
+    # Validate the gate configuration, including T1 rules, before spending
+    # any model time on a run whose thresholds file is broken.
+    check_thresholds(t0_report, require_t1=args.t1)
+    t0_failures = check_thresholds(t0_report)
+    t0_pass = T0Pass(elapsed_ms=elapsed_ms, metrics=metrics_to_dict(t0_report),
+                     gate_failures=t0_failures,
+                     messages=[message_outcome(l, v, v) for l, v in pairs])
 
-    t1_pairs = None
-    run_failures = []
+    report = t0_report
+    repeats: list[Repeat] = []
+    run_failures: list[str] = []
+    inference = None
     if args.t1:
         from tiermod import t1 as t1_mod
 
+        inference = t1_mod.inference_settings()
         escalated = [(l, v) for l, v in pairs if v.needs_llm]
+        labels_by_id = {l.id: l for l, _ in escalated}
         lifts = []
         for run in range(args.repeat):
             print(f"  [T1] run {run + 1}/{args.repeat}: re-scoring "
                   f"{len(escalated)} escalated messages via "
                   f"{t1_mod.model_name()} ...", flush=True)
             inputs = [(Message(id=l.id, text=l.text), v) for l, v in escalated]
-            results = t1_mod.score_batch(inputs)
-            labels_by_id = {l.id: l for l, _ in escalated}
-            t1_pairs = [(labels_by_id[m.id], v) for m, v in results]
+            results = t1_mod.classify_batch(inputs)
+            t1_pairs = [(labels_by_id[m.id], o.verdict) for m, o in results]
             run_report = evaluate(pairs, t1_pairs=t1_pairs)
-            run_failures.extend(f"run {run + 1}: {failure}" for failure in
-                                check_thresholds(run_report, require_t1=True))
-            lift = run_report.t1_lift
-            if lift is not None:
-                lifts.append(lift)
-
-
-    report = evaluate(pairs, t1_pairs=t1_pairs)
-    if args.t1:
+            failures = check_thresholds(run_report, require_t1=True)
+            run_failures.extend(f"run {run + 1}: {failure}" for failure in failures)
+            if run_report.t1_lift is not None:
+                lifts.append(run_report.t1_lift)
+            repeats.append(_repeat(run + 1, pairs, results, run_report, failures))
+            report = run_report
         report.t1_lift_runs = lifts
-    print_report(report, golden, elapsed_ms=elapsed_ms, t1=args.t1)
 
-    failures = run_failures if args.t1 else check_thresholds(report)
+    print_report(report, golden, elapsed_ms=elapsed_ms, t1=args.t1, repeats=repeats)
+
+    failures = run_failures if args.t1 else t0_failures
 
     if args.json:
-        args.json.write_text(json.dumps({**to_dict(report), "gate_failures": failures}, indent=2), encoding="utf-8")
+        artifact = Artifact(
+            provenance=collect_provenance(command=sys.argv, inference=inference),
+            gate={"mode": "t1" if args.t1 else "t0", "repeats": args.repeat if args.t1 else 0,
+                  "passed": not failures, "failures": failures,
+                  "enforced": not args.no_gate},
+            t0=t0_pass,
+            repeats=repeats,
+            summary=_summary(report, repeats),
+        )
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2) + "\n",
+                             encoding="utf-8")
         print(f"  wrote {args.json}")
 
     if failures:

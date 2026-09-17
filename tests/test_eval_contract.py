@@ -232,18 +232,21 @@ def test_earlier_failed_repeat_is_not_hidden_by_final_success(monkeypatch, tmp_p
     def batch(inputs):
         assert all(type(message) is Message for message, _ in inputs)
         calls.append(1)
-        return [(m, Verdict(tier="T1", toxic=labels[m.id].toxic if len(calls) > 1 else False,
-                            scam=labels[m.id].scam if len(calls) > 1 else False))
+        return [(m, t1.Outcome(Verdict(
+                    tier="T1", toxic=labels[m.id].toxic if len(calls) > 1 else False,
+                    scam=labels[m.id].scam if len(calls) > 1 else False), "ok", 1.0))
                 for m, _ in inputs]
 
     output = tmp_path / "results.json"
-    monkeypatch.setattr(t1, "score_batch", batch)
+    monkeypatch.setattr(t1, "classify_batch", batch)
     monkeypatch.setattr("sys.argv", ["harness", "--t1", "--repeat", "2", "--json", str(output)])
     assert harness.main() == 1
     saved = json.loads(output.read_text(encoding="utf-8"))
-    assert saved["t1_lift_runs"][0] < 0
-    assert saved["t1_lift_runs"][1] > 0.25
-    assert all(f.startswith("run 1:") for f in saved["gate_failures"])
+    assert saved["summary"]["t1_lift_runs"][0] < 0
+    assert saved["summary"]["t1_lift_runs"][1] > 0.25
+    assert saved["gate"]["passed"] is False
+    assert all(f.startswith("run 1:") for f in saved["gate"]["failures"])
+    assert saved["repeats"][0]["gate_failures"] and not saved["repeats"][1]["gate_failures"]
 
 
 @pytest.mark.parametrize("contents", ["", "\n", "// no rows"])

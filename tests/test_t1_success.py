@@ -134,3 +134,75 @@ def test_lazy_model_is_initialized_once(monkeypatch):
             release.set()
         assert all(f.result() is model for f in futures)
     assert len(calls) == 1
+
+
+# --- Outcome statuses --------------------------------------------------------
+# A consumer or an eval must be able to tell admission control apart from a
+# broken model without reading logs. Every non-ok status returns the base.
+
+class _Http(Exception):
+    """Stands in for httpx.HTTPError: classified by class name, not import."""
+
+
+class HTTPError(_Http):
+    pass
+
+
+class ReadTimeout(HTTPError):
+    pass
+
+
+@pytest.mark.parametrize("exc, status", [
+    (ReadTimeout("slow"), "transport"),
+    (ConnectionRefusedError(), "transport"),
+    (TimeoutError(), "transport"),
+    (ValueError("bad json"), "validation"),
+    (RuntimeError("server 500"), "model"),
+])
+def test_exception_classification(monkeypatch, exc, status):
+    def raise_it(_prompt):
+        raise exc
+
+    monkeypatch.setattr(t1, "_get_llm", lambda: type("M", (), {"invoke": staticmethod(raise_it)})())
+    base = Verdict(needs_llm=True)
+    outcome = t1.classify(Message(id="m", text="x"), base)
+    assert outcome.status == status and not outcome.succeeded
+    assert outcome.verdict is base
+    assert outcome.error == type(exc).__name__
+    assert outcome.latency_ms >= 0
+
+
+def test_invalid_output_is_a_validation_outcome(monkeypatch):
+    monkeypatch.setattr(t1, "_get_llm", lambda: type("M", (), {"invoke": lambda self, _p: {"toxic": True, "reasons": []}})())
+    outcome = t1.classify(Message(id="m", text="x"), Verdict(needs_llm=True))
+    assert outcome.status == "validation" and outcome.error == "ValidationError"
+
+
+def test_capacity_outcome_when_saturated(monkeypatch):
+    slots = BoundedSemaphore(1)
+    slots.acquire()
+    monkeypatch.setattr(t1, "_slots", slots)
+    monkeypatch.setattr(t1, "_get_llm", lambda: pytest.fail("must not call the model"))
+    base = Verdict(needs_llm=True)
+    outcome = t1.classify(Message(id="m", text="x"), base)
+    assert outcome.status == "capacity" and outcome.verdict is base and outcome.error is None
+    slots.release()
+
+
+def test_ok_outcome_and_wrappers_agree(monkeypatch):
+    monkeypatch.setattr(t1, "_get_llm", lambda: type("M", (), {"invoke": lambda self, _p: result()})())
+    message, base = Message(id="m", text="x"), Verdict(needs_llm=True)
+    outcome = t1.classify(message, base)
+    assert outcome.succeeded and outcome.status == "ok" and outcome.verdict.tier == "T1"
+    assert t1.score_one(message, base) == outcome.verdict
+    [(_, verdict)] = t1.score_batch([(message, base)])
+    assert verdict == outcome.verdict
+    [(_, batched)] = t1.classify_batch([(message, base)])
+    assert batched.status == "ok"
+
+
+def test_inference_settings_match_client_construction():
+    settings = t1.inference_settings()
+    assert settings["model"] == t1.MODEL and settings["num_ctx"] == t1.NUM_CTX
+    assert settings["concurrency"] == t1.CONCURRENCY and settings["timeout_s"] == t1.TIMEOUT_S
+    assert settings["timeout_kind"] == "http-inactivity"
