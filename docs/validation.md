@@ -1,4 +1,27 @@
-# Review-fix validation, 2026-09-17
+# Validation log
+
+## Step 1: evaluation artifacts, 2026-09-17
+
+Implements step 1 of [next-steps-plan.md](next-steps-plan.md).
+
+- 117 unit tests pass, including artifact structure, per-repeat gate
+  failures, fallback status accounting, gate reconstruction from saved
+  counts, unavailable-provenance marking, no fixture text in artifacts, and
+  T1 outcome classification.
+- `uv run --extra llm evals/harness.py --t1 --repeat 3 --json evals/results/step1-2026-09-17.json`
+  on revision `ca45a45` (clean worktree, nothing unavailable) passed every
+  gate on all three repeats. Combined recall 85.1%, precision 97.6%, FPR
+  3.2%, lift +31.9 points each run; the same seven confident misses as the
+  review run. 51/51 inferences succeeded per repeat.
+- Measured T1 latency at concurrency 4, model already loaded: p50 about
+  3.0 s, p95 about 4.1 s per message. A separate run that started with the
+  model unloaded showed p95 12.2 s on its first repeat and about 4.3 s after.
+  Warm and cold behavior differ; benchmarks must report them separately.
+- Hardware in the artifact: RTX 5090, 32 GB; qwen3.5 Q4_K_M, 5.7 GB in VRAM.
+
+These numbers describe the synthetic golden set and one machine.
+
+## Review-fix validation, 2026-09-17
 
 All six review findings are addressed. The implementation plan is in
 [review-plan.md](review-plan.md).

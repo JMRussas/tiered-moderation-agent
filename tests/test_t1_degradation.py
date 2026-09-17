@@ -49,8 +49,16 @@ def unreadable() -> tuple[Label, Verdict]:
     return label, verdict
 
 
-def _explode(*_args, **_kwargs):
-    raise RuntimeError("ollama is down")
+class _Down:
+    """A constructed client whose every call fails, as with an unreachable
+    server. Construction itself is lazy and never connects."""
+
+    def invoke(self, *_args, **_kwargs):
+        raise RuntimeError("ollama is down")
+
+
+def _explode():
+    return _Down()
 
 
 def test_failed_call_returns_the_t0_verdict_unchanged(unreadable, monkeypatch):

@@ -1,6 +1,7 @@
 # Next steps: evidence, integration, and presentation
 
-Status: proposed; implementation has not started.
+Status: in progress. Step 1 is implemented (see
+[evals/results/README.md](../evals/results/README.md)); steps 2-6 are proposed.
 
 ## Objective
 
@@ -209,7 +210,7 @@ document that decision.
 
 ## Completion checklist
 
-- [ ] Reproducible artifacts include all repeats and message outcomes.
+- [x] Reproducible artifacts include all repeats and message outcomes.
 - [ ] Independent labeling and a holdout protocol are established.
 - [ ] Reference consumer passes failure and timing integration tests.
 - [ ] Traffic benchmarks account for all submitted work and operational limits.
