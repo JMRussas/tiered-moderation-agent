@@ -116,7 +116,7 @@ that quietly costs recall fails the build.
 |---|---|
 | [`src/tiermod/t0.py`](src/tiermod/t0.py) | Deterministic scorer. Pure, no I/O, no model. |
 | [`src/tiermod/t1.py`](src/tiermod/t1.py) | LangChain + Ollama re-score. Structured output; degrades to T0 on any failure. |
-| [`evals/golden/`](evals/golden/) | 70 labeled messages + [label policy](evals/golden/README.md). |
+| [`evals/golden/`](evals/golden/) | 78 labeled messages + [label policy](evals/golden/README.md). |
 | [`evals/metrics.py`](evals/metrics.py) | Per-slice precision/recall/FPR, plus the two routing metrics. |
 | [`evals/harness.py`](evals/harness.py) | Runner, report, CI gate. |
 | [`docs/failure-modes.md`](docs/failure-modes.md) | The two bugs, with before/after numbers. |
