@@ -40,6 +40,8 @@ from .schema import Message, Verdict
 #   transport   the server was unreachable or the connection timed out
 #   validation  the model answered, but not in the required shape
 #   model       the server returned an error, or an unclassified exception
+#
+# Failing to construct the client at all is a configuration error and raises.
 Status = Literal["ok", "capacity", "transport", "validation", "model"]
 STATUSES: tuple[Status, ...] = ("ok", "capacity", "transport", "validation", "model")
 
@@ -199,12 +201,16 @@ def classify(message: Message, base: Verdict) -> Outcome:
     The process-wide limit is nonblocking: saturated callers retain uncertainty
     instead of accumulating an unbounded waiting queue inside this function.
     """
+    # Client construction is a configuration error (unknown provider prefix,
+    # missing extra), not a per-message failure: it raises rather than being
+    # reported as a model or validation outcome.
+    llm = _get_llm()
     start = time.perf_counter()
     if not _slots.acquire(blocking=False):
         logger.warning("T1 capacity exhausted; retaining T0 verdict")
         return Outcome(base, "capacity", _elapsed_ms(start))
     try:
-        raw = _get_llm().invoke(
+        raw = llm.invoke(
             [("system", SYSTEM), ("human", f"<message>{message.text}</message>")]
         )
         result = T1Result.model_validate(raw)

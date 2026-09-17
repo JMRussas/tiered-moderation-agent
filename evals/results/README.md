@@ -59,14 +59,14 @@ gate
   mode         "t0" | "t1"
   repeats      number of T1 repeats (0 for a T0 run)
   passed       no threshold failed on any repeat
-  failures     ["run N: <rule>", ...]
+  failures     ["<rule>", ...] for a T0 run; ["run N: <rule>", ...] for T1
   enforced     false when --no-gate was passed
 t0
   elapsed_ms, metrics, gate_failures, messages[]
 repeats[]      one per T1 repeat
   index, metrics, gate_failures
   t1           evaluated, status_counts{ok,capacity,transport,validation,model},
-               latency_ms{n,p50,p95,max,mean} over all attempts,
+               latency_ms{n,p50_ms,p95_ms,max_ms,mean_ms} over all attempts,
                ok_latency_ms over validated results only
   messages[]
 summary        headline rates for the final repeat (or the T0 pass), t1_lift_runs,
