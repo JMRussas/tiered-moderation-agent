@@ -45,9 +45,9 @@ def test_gated_slice_has_both_classes():
 def test_no_real_blocklist_terms_committed():
     """The committed list must stay synthetic. If someone points this at a real
     list and commits it, fail loudly."""
-    terms = json.loads((ROOT / "data" / "blocklist.json").read_text(encoding="utf-8"))
+    terms = json.loads((ROOT / "src" / "tiermod" / "blocklist.json").read_text(encoding="utf-8"))
     assert all(t.startswith("zzsynth") for t in terms), (
-        "data/blocklist.json must contain synthetic placeholders only"
+        "src/tiermod/blocklist.json must contain synthetic placeholders only"
     )
 
 
@@ -160,3 +160,95 @@ def test_shipped_thresholds_are_valid():
     import harness
 
     assert harness.check_thresholds(_report()) == []
+
+
+@pytest.mark.parametrize("config", [
+    "", "[slices.all]\nrecall = 0.9", "[slice.all]\nrecall = nan",
+    "[slice.all]\nrecall = 1.5", "[slice.all]\nrecall = true",
+])
+def test_invalid_gate_configuration_is_rejected(tmp_path, monkeypatch, config):
+    harness = _with_thresholds(tmp_path, monkeypatch, config)
+    with pytest.raises(ValueError):
+        harness.check_thresholds(_report())
+
+
+def test_missing_required_slice_fails(tmp_path, monkeypatch):
+    harness = _with_thresholds(tmp_path, monkeypatch, "[slice.paraphrase]", "recall = 0.5")
+    pairs = [(l, t0.score(l.text)) for l in load_golden() if not l.paraphrase]
+    assert "required slice paraphrase" in harness.check_thresholds(evaluate(pairs))[0]
+
+
+def test_undefined_required_metric_fails(tmp_path, monkeypatch):
+    harness = _with_thresholds(tmp_path, monkeypatch, "[slice.all]", "precision = 0.9")
+    report = evaluate([(l, Verdict()) for l in load_golden()])
+    assert harness.check_thresholds(report) == ["all.precision is undefined"]
+
+
+def test_no_misses_satisfies_routing_without_fake_ratio(tmp_path, monkeypatch):
+    harness = _with_thresholds(tmp_path, monkeypatch, "[routing]", "min_safe_miss_rate = 1.0")
+    report = evaluate([(l, Verdict(toxic=l.toxic, scam=l.scam)) for l in load_golden()])
+    assert report.routing.safe_miss_rate is None
+    assert harness.check_thresholds(report) == []
+
+
+def test_total_failure_has_zero_f1():
+    assert Counts(fn=3).f1 == 0.0
+
+
+def test_t1_outage_fails_even_though_fallback_is_safe():
+    import harness
+
+    pairs = [(l, t0.score(l.text)) for l in load_golden()]
+    report = evaluate(pairs, t1_pairs=[(l, v) for l, v in pairs if v.needs_llm])
+    assert report.t1_successful == 0
+    assert any("success_rate" in f for f in harness.check_thresholds(report))
+
+
+def test_missing_t1_run_fails_when_required():
+    import harness
+
+    assert "T1 evaluation is required but missing" in harness.check_thresholds(
+        _report(), require_t1=True
+    )
+
+
+def test_partial_t1_coverage_fails():
+    import harness
+
+    pairs = [(l, t0.score(l.text)) for l in load_golden()]
+    escalated = [(l, v) for l, v in pairs if v.needs_llm]
+    report = evaluate(pairs, t1_pairs=escalated[:1])
+    assert any("every escalated message" in f for f in harness.check_thresholds(report))
+
+
+def test_earlier_failed_repeat_is_not_hidden_by_final_success(monkeypatch, tmp_path):
+    import harness
+    from tiermod import t1
+    from tiermod.schema import Message
+
+    calls = []
+    labels = {l.id: l for l in load_golden()}
+
+    def batch(inputs):
+        assert all(type(message) is Message for message, _ in inputs)
+        calls.append(1)
+        return [(m, Verdict(tier="T1", toxic=labels[m.id].toxic if len(calls) > 1 else False,
+                            scam=labels[m.id].scam if len(calls) > 1 else False))
+                for m, _ in inputs]
+
+    output = tmp_path / "results.json"
+    monkeypatch.setattr(t1, "score_batch", batch)
+    monkeypatch.setattr("sys.argv", ["harness", "--t1", "--repeat", "2", "--json", str(output)])
+    assert harness.main() == 1
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["t1_lift_runs"][0] < 0
+    assert saved["t1_lift_runs"][1] > 0.25
+    assert all(f.startswith("run 1:") for f in saved["gate_failures"])
+
+
+@pytest.mark.parametrize("contents", ["", "\n", "// no rows"])
+def test_empty_golden_is_rejected(tmp_path, contents):
+    path = tmp_path / "empty.jsonl"
+    path.write_text(contents, encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        load_golden(path)

@@ -5,47 +5,41 @@ for one reason: to recover the positives T0 flagged ``needs_llm``. Its value is
 therefore not "accuracy" in the abstract, it is **lift over T0 on the escalated
 subset**. If that lift is small, this tier should be deleted.
 
-Two things here are deliberate and worth reading
-------------------------------------------------
-**Structured output, not prompt-and-parse.** The upstream system this was
-extracted from asked for JSON in prose (``Return ONLY JSON: {...}``), parsed the
-reply by hand, coerced the fields, and collapsed any failure to a dropped
-verdict. That is the single most fragile pattern in local-model work: small
-models produce *almost*-JSON constantly -- a stray prose preamble, a trailing
-comma, a markdown fence. ``with_structured_output`` moves the contract into the
-tool-call layer, where a mismatch is a retry against a schema instead of a
-message that silently loses its verdict.
-
-**Explicit ``num_ctx``.** Ollama applies its own context window at serve time
-and truncates an over-long prompt *silently* -- no error, just a worse answer.
-The client value always wins, so we send one rather than inheriting whatever the
-server happens to be configured with today.
+T1 makes one structured-output attempt. Schema mismatches degrade to T0;
+there are no automatic retries. The HTTP client has an inactivity timeout,
+not a guaranteed end-to-end deadline. Callers must bound their input queues.
 
 Degradation contract
 --------------------
 Every failure path returns T0's verdict unchanged. A dead Ollama, a timeout, a
 schema the model will not satisfy: all of them mean "no lift", never "clean".
-That is what makes the tier safe to depend on and safe to switch off.
+Consumers must still honor uncertainty on fallback and allow for model errors.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore, Lock
 from typing import Literal, Sequence
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .schema import Label, Verdict
+from .schema import Message, Verdict
 
 MODEL = os.getenv("T1_MODEL", "ollama:qwen3.5")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 NUM_CTX = int(os.getenv("T1_NUM_CTX", "8192"))
-# Measured sweet spot on a single dedicated GPU. Above ~8 the per-request
-# latency degrades faster than throughput improves. This is admission control,
-# not a tuning knob to max out.
+# Shared by direct calls and all batches in this process.
 CONCURRENCY = int(os.getenv("T1_CONCURRENCY", "4"))
 TIMEOUT_S = float(os.getenv("T1_TIMEOUT_S", "30"))
+if CONCURRENCY < 1 or TIMEOUT_S <= 0 or NUM_CTX <= 512:
+    raise ValueError("T1 requires positive concurrency/timeout and NUM_CTX > 512")
+
+_slots = BoundedSemaphore(CONCURRENCY)
+_init_lock = Lock()
+logger = logging.getLogger(__name__)
 
 
 def model_name() -> str:
@@ -53,7 +47,7 @@ def model_name() -> str:
 
 
 class T1Result(BaseModel):
-    """The contract T1 must satisfy. Enforced by the tool-call layer."""
+    """The contract T1 must satisfy. Validated after structured generation."""
 
     toxic: bool = Field(
         description=(
@@ -74,6 +68,18 @@ class T1Result(BaseModel):
         default=None,
         description="English translation, or null if the message is already English.",
     )
+
+    reasons: list[str] = Field(
+        description="Brief moderator-readable reasons; required for toxic or scam content, otherwise empty."
+    )
+
+    @model_validator(mode="after")
+    def require_explanation(self):
+        if any(not reason.strip() for reason in self.reasons):
+            raise ValueError("Reasons must not be blank")
+        if (self.toxic or self.scam) and not self.reasons:
+            raise ValueError("Flagged content requires an explanation")
+        return self
 
 
 SYSTEM = (
@@ -97,69 +103,75 @@ def _get_llm():
     if _llm is not None:
         return _llm
 
+    with _init_lock:
+        if _llm is None:
+            _llm = _create_llm()
+    return _llm
+
+
+def _create_llm():
     from langchain.chat_models import init_chat_model
 
-    _llm = init_chat_model(
+    return init_chat_model(
         MODEL,
         base_url=OLLAMA_URL,
         num_ctx=NUM_CTX,
         reasoning=False,  # thinking blocks burn context and add nothing here
         temperature=0,
-        # ChatOllama exposes no `timeout` field of its own; the value has to
-        # reach the underlying httpx client. Without this a hung Ollama pins a
-        # worker forever and the bounded pool drains to zero.
+        num_predict=512,
+        # Inactivity timeout for the underlying HTTP client, not a total deadline.
         client_kwargs={"timeout": TIMEOUT_S},
         # Ollama publishes no model profile, so LangChain cannot size a context
         # budget on its own. Declare the window we actually serve.
         profile={"max_input_tokens": NUM_CTX - 512},
-    ).with_structured_output(T1Result)
-    return _llm
+    ).with_structured_output(T1Result, method="json_schema")
 
 
-def score_one(label: Label, base: Verdict) -> Verdict:
-    """Re-score one escalated message. Never raises.
+def score_one(message: Message, base: Verdict) -> Verdict:
+    """Attempt inference once, preserving the exact base on failure or overload.
 
-    `base` is REQUIRED and has no default, deliberately. An earlier version made
-    it optional, and `score_batch` then called this through `pool.map` with one
-    iterable -- so every failure degraded to a blank `Verdict()` instead of to
-    T0's. That silently cleared `needs_llm`, converting "I could not read this"
-    into "this is clean": the exact failure this project exists to prevent, in
-    the project's own code. Keeping the parameter mandatory makes that
-    unwritable rather than merely fixed.
+    The process-wide limit is nonblocking: saturated callers retain uncertainty
+    instead of accumulating an unbounded waiting queue inside this function.
     """
-    try:
-        result: T1Result = _get_llm().invoke(
-            [("system", SYSTEM), ("human", f"<message>{label.text}</message>")]
-        )
-    except Exception:
-        # Degrade to T0. No lift, but no false confidence either.
+    if not _slots.acquire(blocking=False):
+        logger.warning("T1 capacity exhausted; retaining T0 verdict")
         return base
-
-    return Verdict(
-        toxic=result.toxic,
-        scam=result.scam,
-        question=base.question,  # structural; T0 already decided it
-        friendliness={"positive": 0.6, "neutral": 0.0, "negative": -0.6}[result.sentiment],
-        needs_llm=False,  # this IS the escalation
-        arabizi=base.arabizi,
-        tier="T1",
-        lang=result.lang,
-        translation=result.translation,
-    )
+    try:
+        raw = _get_llm().invoke(
+            [("system", SYSTEM), ("human", f"<message>{message.text}</message>")]
+        )
+        result = T1Result.model_validate(raw)
+        return Verdict(
+            toxic=result.toxic,
+            scam=result.scam,
+            question=base.question,
+            friendliness={"positive": 0.6, "neutral": 0.0, "negative": -0.6}[result.sentiment],
+            needs_llm=False,
+            arabizi=base.arabizi,
+            tier="T1",
+            lang=result.lang,
+            translation=result.translation,
+            reasons=result.reasons,
+        )
+    except Exception as exc:
+        # Exception messages may contain private chat. Record only the type.
+        logger.warning("T1 failed (%s); retaining T0 verdict", type(exc).__name__)
+        return base
+    finally:
+        _slots.release()
 
 
 def score_batch(
-    pairs: Sequence[tuple[Label, Verdict]],
-) -> list[tuple[Label, Verdict]]:
-    """Score many, bounded. Order of the input is preserved.
+    pairs: Sequence[tuple[Message, Verdict]],
+) -> list[tuple[Message, Verdict]]:
+    """Score a finite batch in input order, subject to the shared inference limit.
 
-    Takes (label, T0 verdict) pairs rather than bare labels so the degradation
-    target travels with each message and cannot be forgotten at the call site.
+    The batch is materialized; callers must bound batch size. This is not a
+    streaming queue or admission controller across multiple processes.
     """
     if not pairs:
         return []
-    labels = [l for l, _ in pairs]
-    bases = [v for _, v in pairs]
+    messages, bases = zip(*pairs)
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        verdicts = list(pool.map(score_one, labels, bases))
-    return list(zip(labels, verdicts))
+        verdicts = list(pool.map(score_one, messages, bases))
+    return list(zip(messages, verdicts))

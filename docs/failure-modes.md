@@ -214,10 +214,10 @@ The defect half is caught precisely, and without a model, by the unit tests.
 
 ---
 
-## What the tiering buys, measured
+## Historical model measurement (before the review fixes)
 
 The point of tolerating T0's blindness is that T1 recovers it. On the golden
-set, with `ollama:qwen3.5` re-scoring only the 40 messages T0 escalated:
+set, with `ollama:qwen3.5` re-scoring only the 47 messages T0 escalated:
 
 | | T0 alone | T0 + T1 |
 |---|---|---|
@@ -266,3 +266,32 @@ which is the only honest way to lower a floor.
 
 A regression test that only ever existed after its bug was fixed never proved
 that it catches anything.
+
+
+## FM-5 -- Review found gaps outside the golden set
+
+**Status:** fixed; regression cases in `tests/test_review_regressions.py`.
+The older failure modes above record historical implementations and results.
+
+A positive prefix changed `you should disappear forever` from uncertain to
+confidently clean. Short hostility and scripts outside the enumerated Unicode
+ranges could also bypass escalation. A 100% safe-miss ratio on the golden set
+was never a guarantee about other input.
+
+The router now clears only a small allowlist of complete trivial messages.
+Unmatched content escalates regardless of sentiment or length. This replaces
+FM-2's narrower rule (e), rather than adding more keyword exceptions. On the
+same 78 fixtures, escalation rises from 47/78 (60.3%) to 51/78 (65.4%); T0
+precision, recall, and safe-miss ratio are unchanged. The 70% cost gate stays.
+
+The review also found that combined T1 scores were not gated, empty evaluations
+passed, and installed wheels omitted the blocklist. The harness now gates every
+T1 repeat and rejects missing evaluation/configuration inputs. The packaged
+policy is tested from an installed wheel and invalid policy fails visibly.
+T1 accepts runtime messages instead of requiring ground truth, validates
+explanations, and preserves the original verdict on malformed results. Shared
+process-level admission limits cover direct calls and concurrent batches.
+
+Tests cover a completely broken model, a failed first repeat followed by a
+successful second repeat, missing policy, malformed output, and overload. These
+checks establish implementation contracts, not perfect model accuracy.

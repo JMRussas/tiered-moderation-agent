@@ -44,4 +44,13 @@ min_safe_miss_rate = 1.0    # measured 1.000
 # model; if this creeps up, the thesis is quietly no longer true.
 # NOTE: this set is adversarial-weighted, so the value here is far above
 # production traffic. Treat it as a regression tripwire, not a throughput claim.
-max_escalation_rate = 0.70  # measured 0.603
+max_escalation_rate = 0.70  # measured 0.654 after conservative routing fix
+
+# Applied only with --t1, to EVERY repeat. These are acceptance targets based
+# on the historical model run, not claims about the updated prompt/schema.
+[t1]
+precision = 0.90
+recall = 0.80
+fpr = 0.06
+min_lift = 0.25
+min_success_rate = 0.95

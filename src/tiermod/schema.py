@@ -49,7 +49,14 @@ class Verdict(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
-class Label(BaseModel):
+class Message(BaseModel):
+    """Runtime input; requires no ground-truth annotations."""
+
+    id: str
+    text: str
+
+
+class Label(Message):
     """Ground truth for one golden-set message.
 
     `t0_blind` is an assertion about the *fixture*, not about any
@@ -58,8 +65,6 @@ class Label(BaseModel):
     separately from ordinary misses.
     """
 
-    id: str
-    text: str
     toxic: bool
     scam: bool
     question: bool

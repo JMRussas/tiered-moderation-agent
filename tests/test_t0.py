@@ -148,13 +148,13 @@ def test_blocklist_path_env_is_honoured(tmp_path, monkeypatch):
     assert t0.load_blocklist() == {"zzcustomterm"}
 
 
-def test_missing_blocklist_file_is_not_fatal(tmp_path, monkeypatch):
-    """A bad path must degrade to no blocklist, not crash the pipeline on
-    every message."""
+def test_missing_blocklist_file_is_a_configuration_error(tmp_path, monkeypatch):
+    """A bad path must never silently disable moderation policy."""
     monkeypatch.setenv("BLOCKLIST_PATH", str(tmp_path / "nope.json"))
     monkeypatch.setattr(t0, "_BLOCKLIST", None)
 
-    assert t0.load_blocklist() == set()
+    with pytest.raises(t0.BlocklistError, match="Cannot load blocklist"):
+        t0.load_blocklist()
 
 
 # --- Explainability -------------------------------------------------------

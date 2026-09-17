@@ -54,10 +54,8 @@ class Counts:
 
     @property
     def f1(self) -> float | None:
-        p, r = self.precision, self.recall
-        if p is None or r is None or (p + r) == 0:
-            return None
-        return 2 * p * r / (p + r)
+        denominator = 2 * self.tp + self.fp + self.fn
+        return 2 * self.tp / denominator if denominator else None
 
     @property
     def fpr(self) -> float | None:
@@ -120,6 +118,8 @@ class Report:
     # recall(T0 then T1) minus recall(T0), on `flagged`. None when T1 was off.
     t1_lift: float | None = None
     t1_evaluated: int = 0
+    t1_requested: bool = False
+    t1_successful: int = 0
     # Positives still missed after T1 that no longer carry needs_llm --
     # "confident and wrong" at the end of the pipeline.
     #
@@ -177,7 +177,7 @@ def evaluate(
 
     `t1_pairs` holds only the messages T0 escalated, with T1's verdict. The
     combined tier takes T1's answer where it exists and T0's everywhere else —
-    which is what the production path does.
+    matching the routing implemented by the harness.
     """
     pairs = list(pairs)
 
@@ -205,8 +205,14 @@ def evaluate(
 
     report = Report(slices=slices, routing=routing)
 
-    if t1_pairs:
+    if t1_pairs is not None:
+        report.t1_requested = True
         recovered = {l.id: v for l, v in t1_pairs}
+        if len(recovered) != len(t1_pairs):
+            raise ValueError("Duplicate T1 message IDs")
+        escalated_ids = {l.id for l, v in pairs if v.needs_llm}
+        if not recovered.keys() <= escalated_ids:
+            raise ValueError("T1 results must belong to escalated messages")
         combined = [
             (l, recovered.get(l.id, v)) for l, v in pairs
         ]
@@ -215,6 +221,7 @@ def evaluate(
         if base and base.flagged.recall is not None and after.flagged.recall is not None:
             report.t1_lift = after.flagged.recall - base.flagged.recall
         report.t1_evaluated = len(t1_pairs)
+        report.t1_successful = sum(v.tier == "T1" for _, v in t1_pairs)
         after.name = "all+t1"
         report.slices.append(after)
 

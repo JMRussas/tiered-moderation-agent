@@ -10,10 +10,13 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync
+      - run: uv sync --locked
 
       - name: Unit tests
         run: uv run pytest -q
+
+      - name: Installed wheel smoke check
+        run: uv run tools/check_wheel.py
 
       # T0 only. No Ollama in CI, and that is the point: the deterministic tier
       # and every routing invariant are verifiable with no model at all.

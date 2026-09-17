@@ -9,11 +9,11 @@ people actually audit.
 It is **not** a representative sample of live chat. Real chat is ~95% benign
 trivia, and a set shaped like that would spend 74 of 78 rows confirming that
 "lol" is fine. This set is deliberately **adversarial-weighted**: roughly 60%
-benign (including 10 false-positive traps) and 40% positive, so that per-slice
+positive and 40% benign (including 10 false-positive traps), so that per-slice
 precision and recall are measurable at this size.
 
-Tier throughput on realistic traffic is a separate measurement, taken from a
-replay stream — not from this file. Do not quote the escalation rate here as
+Tier throughput on realistic traffic requires a separate measurement from a
+replay stream (not yet included in this repository) — not from this file. Do not quote the escalation rate here as
 if it were a production number.
 
 ## Provenance — everything here is synthetic
@@ -29,7 +29,7 @@ gitignores it. That data does not leave the machine it was captured on.
 ## No real slurs
 
 The blocklist path is exercised with **synthetic placeholder tokens**
-(`zzsynthslur`, `zzsynthslur2`) checked into `data/blocklist.json`.
+(`zzsynthslur`, `zzsynthslur2`) checked into `src/tiermod/blocklist.json`.
 
 This is a deliberate engineering decision, not squeamishness:
 
