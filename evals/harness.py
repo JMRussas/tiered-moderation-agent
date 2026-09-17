@@ -331,7 +331,7 @@ def main() -> int:
         )
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(artifact.model_dump(mode="json"), indent=2) + "\n",
-                             encoding="utf-8")
+                             encoding="utf-8", newline="\n")
         print(f"  wrote {args.json}")
 
     if failures:
