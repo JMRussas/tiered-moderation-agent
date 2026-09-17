@@ -1,7 +1,9 @@
 # Next steps: evidence, integration, and presentation
 
 Status: in progress. Step 1 is implemented (see
-[evals/results/README.md](../evals/results/README.md)); steps 2-6 are proposed.
+[evals/results/README.md](../evals/results/README.md)). Step 2's guide, prompts,
+and tooling are in [evals/holdout/](../evals/holdout/README.md); generation has
+not run. Steps 3-6 are proposed.
 
 ## Objective
 
