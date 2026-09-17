@@ -5,13 +5,14 @@
     uv run evals/harness.py --json out.json
 
 Exits non-zero when a threshold in evals/thresholds.toml is breached, so a
-prompt tweak that quietly costs recall fails the build instead of shipping.
+T0 regressions fail CI and --t1 also gates model quality on every repeat.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 import tomllib
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT / "evals"))
 
 from metrics import SLICES, Report, evaluate  # noqa: E402
 from tiermod import t0  # noqa: E402
-from tiermod.schema import Label, Verdict  # noqa: E402
+from tiermod.schema import Label, Message, Verdict  # noqa: E402
 
 GOLDEN = ROOT / "evals" / "golden" / "messages.jsonl"
 THRESHOLDS = ROOT / "evals" / "thresholds.toml"
@@ -38,6 +39,10 @@ def load_golden(path: Path = GOLDEN) -> list[Label]:
         line = line.strip()
         if line and not line.startswith("//"):
             rows.append(Label(**json.loads(line)))
+    if not rows:
+        raise ValueError("Golden set must not be empty")
+    if len({row.id for row in rows}) != len(rows):
+        raise ValueError("Golden set IDs must be unique")
     return rows
 
 
@@ -113,59 +118,80 @@ def print_report(
 
 # --- Thresholds -----------------------------------------------------------
 
-def check_thresholds(report: Report) -> list[str]:
-    if not THRESHOLDS.exists():
-        return []
-    cfg = tomllib.loads(THRESHOLDS.read_text(encoding="utf-8"))
-    failures: list[str] = []
+def _check_metric(failures: list[str], name: str, got: float | None,
+                  limit: float, *, maximum: bool = False) -> None:
+    if got is None:
+        failures.append(f"{name} is undefined")
+    elif (got > limit if maximum else got < limit):
+        failures.append(f"{name} {got:.3f} {'> max' if maximum else '< min'} {limit}")
 
-    # A typo in this file used to be a silent no-op -- `getattr(..., None)` for
-    # an unknown metric, `continue` for an unknown slice. Both made CI pass
-    # having gated nothing, which is the worst possible behaviour for the file
-    # whose only job is gating. Unknown keys are now hard errors.
+
+def check_thresholds(report: Report, *, require_t1: bool = False) -> list[str]:
+    # A missing file is a configuration error, never an implicit --no-gate.
+    cfg = tomllib.loads(THRESHOLDS.read_text(encoding="utf-8"))
+    if not cfg or set(cfg) - {"slice", "routing", "t1"}:
+        raise ValueError("thresholds.toml: empty configuration or unknown section")
+    allowed_t1 = VALID_METRICS | {"min_lift", "min_success_rate"}
+    sections = [("routing", cfg.get("routing", {}), VALID_ROUTING),
+                ("t1", cfg.get("t1", {}), allowed_t1)]
     for name, rules in cfg.get("slice", {}).items():
         if name not in SLICES:
-            raise ValueError(
-                f"thresholds.toml: unknown slice [slice.{name}]. "
-                f"Known: {', '.join(sorted(SLICES))}"
-            )
-        for metric in rules:
-            if metric not in VALID_METRICS:
-                raise ValueError(
-                    f"thresholds.toml: unknown metric '{metric}' under [slice.{name}]. "
-                    f"Known: {', '.join(sorted(VALID_METRICS))}"
-                )
-    for key in cfg.get("routing", {}):
-        if key not in VALID_ROUTING:
-            raise ValueError(
-                f"thresholds.toml: unknown key '{key}' under [routing]. "
-                f"Known: {', '.join(sorted(VALID_ROUTING))}"
-            )
+            raise ValueError(f"thresholds.toml: unknown slice [slice.{name}]")
+        sections.append((f"slice.{name}", rules, VALID_METRICS))
+    if not any(rules for _, rules, _ in sections):
+        raise ValueError("thresholds.toml: no rules configured")
+    for section, rules, allowed in sections:
+        if not isinstance(rules, dict):
+            raise ValueError(f"thresholds.toml: {section} must be a table")
+        for key, value in rules.items():
+            if key not in allowed:
+                kind = "metric" if section.startswith("slice.") else "key"
+                raise ValueError(f"thresholds.toml: unknown {kind} '{key}' under [{section}]")
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= 1):
+                raise ValueError(f"thresholds.toml: {section}.{key} must be between 0 and 1")
 
+    failures: list[str] = []
+    if report.routing.total == 0:
+        failures.append("evaluation contains no messages")
     for name, rules in cfg.get("slice", {}).items():
-        s = report.slice_by(name)
-        if s is None:
+        current = report.slice_by(name)
+        if current is None or current.n == 0:
+            failures.append(f"required slice {name} is missing or empty")
             continue
-        for metric, floor in rules.items():
-            got = getattr(s.flagged, metric, None)
-            if metric == "fpr":
-                if got is not None and got > floor:
-                    failures.append(f"{name}.fpr {got:.3f} > max {floor}")
-            elif got is not None and got < floor:
-                failures.append(f"{name}.{metric} {got:.3f} < min {floor}")
+        for metric, limit in rules.items():
+            _check_metric(failures, f"{name}.{metric}", getattr(current.flagged, metric),
+                          limit, maximum=metric == "fpr")
 
     routing = cfg.get("routing", {})
     r = report.routing
-    if "max_escalation_rate" in routing and r.escalation_rate is not None:
-        if r.escalation_rate > routing["max_escalation_rate"]:
-            failures.append(
-                f"escalation_rate {r.escalation_rate:.3f} > max {routing['max_escalation_rate']}"
-            )
-    if "min_safe_miss_rate" in routing and r.safe_miss_rate is not None:
-        if r.safe_miss_rate < routing["min_safe_miss_rate"]:
-            failures.append(
-                f"safe_miss_rate {r.safe_miss_rate:.3f} < min {routing['min_safe_miss_rate']}"
-            )
+    if "max_escalation_rate" in routing:
+        _check_metric(failures, "escalation_rate", r.escalation_rate,
+                      routing["max_escalation_rate"], maximum=True)
+    if "min_safe_miss_rate" in routing:
+        # With zero misses the safety condition is satisfied, though its ratio
+        # is undefined. Empty evaluations are rejected independently above.
+        if r.missed_escalated + r.missed_silent:
+            _check_metric(failures, "safe_miss_rate", r.safe_miss_rate,
+                          routing["min_safe_miss_rate"])
+
+    if require_t1 or report.t1_requested:
+        rules = cfg.get("t1", {})
+        if not {"precision", "recall", "fpr", "min_lift", "min_success_rate"} <= rules.keys():
+            raise ValueError("thresholds.toml: T1 requires quality, lift, and success-rate rules")
+        combined = report.slice_by("all+t1")
+        if not report.t1_requested or combined is None:
+            failures.append("T1 evaluation is required but missing")
+        else:
+            if report.t1_evaluated != r.escalated:
+                failures.append("T1 evaluation does not cover every escalated message")
+            for metric in VALID_METRICS & rules.keys():
+                _check_metric(failures, f"all+t1.{metric}", getattr(combined.flagged, metric),
+                              rules[metric], maximum=metric == "fpr")
+            _check_metric(failures, "t1.lift", report.t1_lift, rules["min_lift"])
+            success = (report.t1_successful / report.t1_evaluated
+                       if report.t1_evaluated else None)
+            _check_metric(failures, "t1.success_rate", success, rules["min_success_rate"])
     return failures
 
 
@@ -189,6 +215,9 @@ def to_dict(report: Report) -> dict:
             "silent_misses": report.routing.silent_ids,
         },
         "combined_confident_misses": report.combined_confident_misses,
+        "t1_requested": report.t1_requested,
+        "t1_evaluated": report.t1_evaluated,
+        "t1_successful": report.t1_successful,
         "t1_lift": report.t1_lift,
         "t1_lift_runs": report.t1_lift_runs,
     }
@@ -207,6 +236,8 @@ def main() -> int:
     ap.add_argument("--no-gate", action="store_true", help="report only, never fail")
     args = ap.parse_args()
 
+    if args.repeat < 1:
+        ap.error("--repeat must be at least 1")
     golden = load_golden()
 
     start = time.perf_counter()
@@ -216,18 +247,24 @@ def main() -> int:
     pairs = list(zip(golden, verdicts))
 
     t1_pairs = None
+    run_failures = []
     if args.t1:
         from tiermod import t1 as t1_mod
 
         escalated = [(l, v) for l, v in pairs if v.needs_llm]
         lifts = []
-        for run in range(max(1, args.repeat)):
+        for run in range(args.repeat):
             print(f"  [T1] run {run + 1}/{args.repeat}: re-scoring "
                   f"{len(escalated)} escalated messages via "
                   f"{t1_mod.model_name()} ...", flush=True)
-            # Pairs, not bare labels: T1 must know what to degrade back to.
-            t1_pairs = t1_mod.score_batch(escalated)
-            lift = evaluate(pairs, t1_pairs=t1_pairs).t1_lift
+            inputs = [(Message(id=l.id, text=l.text), v) for l, v in escalated]
+            results = t1_mod.score_batch(inputs)
+            labels_by_id = {l.id: l for l, _ in escalated}
+            t1_pairs = [(labels_by_id[m.id], v) for m, v in results]
+            run_report = evaluate(pairs, t1_pairs=t1_pairs)
+            run_failures.extend(f"run {run + 1}: {failure}" for failure in
+                                check_thresholds(run_report, require_t1=True))
+            lift = run_report.t1_lift
             if lift is not None:
                 lifts.append(lift)
 
@@ -237,11 +274,12 @@ def main() -> int:
         report.t1_lift_runs = lifts
     print_report(report, golden, elapsed_ms=elapsed_ms, t1=args.t1)
 
+    failures = run_failures if args.t1 else check_thresholds(report)
+
     if args.json:
-        args.json.write_text(json.dumps(to_dict(report), indent=2), encoding="utf-8")
+        args.json.write_text(json.dumps({**to_dict(report), "gate_failures": failures}, indent=2), encoding="utf-8")
         print(f"  wrote {args.json}")
 
-    failures = check_thresholds(report)
     if failures:
         print("  THRESHOLD FAILURES")
         for f in failures:

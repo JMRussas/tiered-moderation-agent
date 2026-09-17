@@ -1,8 +1,7 @@
-"""T0 -- deterministic scoring. No model, no network, no I/O.
+"""T0 -- deterministic scoring. No model or network; lazy blocklist loading.
 
-Runs on every message. Target is single-digit microseconds, because this tier
-is the reason the architecture is affordable: if ~90% of live chat resolves
-here, the model budget only has to cover the remainder.
+Runs on every message. The cost depends on how much traffic resolves here;
+that fraction still needs measurement on representative chat.
 
 The design property that matters more than accuracy
 ---------------------------------------------------
@@ -22,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
+from importlib.resources import files
 from pathlib import Path
 
 from .schema import Verdict
@@ -98,13 +99,14 @@ SCAM = [
     ),
 ]
 
-LINK = re.compile(
-    r"(https?://|www\.)\S+|[a-z0-9-]+\.(?:com|net|io|xyz|link|live|gg|shop|store)\b", re.I
-)
+# Only complete, explicitly reviewed trivial messages may bypass inference.
+# Positive sentiment is not evidence that the rest of a message is harmless.
+_TRIVIAL = re.compile(r"(?:lol|gg|hi|hello|thanks|thank you|<3|\U0001f525+)[!.]*", re.I)
 
-# Arabic, Cyrillic, CJK blocks. Presence of any means the Latin lexicons above
-# had no chance of applying.
-NON_LATIN = re.compile(r"[؀-ۿݐ-ݿ一-鿿Ѐ-ӿ]")
+
+def _has_non_latin_letters(text: str) -> bool:
+    return any(c.isalpha() and "LATIN" not in unicodedata.name(c, "") for c in text)
+
 
 # --- Arabizi --------------------------------------------------------------
 # Egyptian Arabic written in Latin letters with digits standing in for Arabic
@@ -141,28 +143,35 @@ def looks_arabizi(text: str) -> bool:
 # evals/golden/README.md for why the golden set contains no real slurs.
 
 _BLOCKLIST: set[str] | None = None
-_DEFAULT_BLOCKLIST = Path(__file__).resolve().parents[2] / "data" / "blocklist.json"
 
 
-def _configured_path() -> Path:
-    """BLOCKLIST_PATH wins over the committed placeholder file.
-
-    Deployments point this at a private, moderator-maintained list. It is read
-    here rather than documented-and-ignored, which is what it was.
-    """
-    env = os.getenv("BLOCKLIST_PATH", "").strip()
-    return Path(env) if env else _DEFAULT_BLOCKLIST
+class BlocklistError(ValueError):
+    """The configured moderation policy could not be loaded safely."""
 
 
 def load_blocklist(path: str | Path | None = None) -> set[str]:
+    """Load once per process; invalid or missing policy fails visibly.
+
+    Set BLOCKLIST_PATH before the first call. An explicit empty JSON list is
+    supported, but a missing file never implicitly disables this policy.
+    """
     global _BLOCKLIST
     if path is None and _BLOCKLIST is not None:
         return _BLOCKLIST
-    p = Path(path) if path else _configured_path()
+    configured = os.getenv("BLOCKLIST_PATH", "").strip()
+    if path is not None:
+        source = Path(path)
+    elif configured:
+        source = Path(configured)
+    else:
+        source = files("tiermod").joinpath("blocklist.json")
     try:
-        terms = {str(t).lower() for t in json.loads(p.read_text(encoding="utf-8"))}
-    except (OSError, ValueError):
-        terms = set()
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BlocklistError(f"Cannot load blocklist from {source}") from exc
+    if not isinstance(raw, list) or any(not isinstance(t, str) or not t.strip() for t in raw):
+        raise BlocklistError(f"Blocklist at {source} must be a JSON list of nonempty strings")
+    terms = {t.strip().lower() for t in raw}
     if path is None:
         _BLOCKLIST = terms
     return terms
@@ -222,38 +231,15 @@ def score(
         friendliness = None
 
     # --- Escalation -------------------------------------------------------
-    # The honesty flag. Escalate whenever this tier has structural reason to
-    # doubt its own verdict:
+    # Unmatched content is unknown regardless of length or sentiment. This
+    # deliberately increases model traffic; benchmark the cost on real traffic.
     arabizi = looks_arabizi(t)
-    words = re.sub(r"[^\w]+", " ", t, flags=re.UNICODE).split()
-    forced = translate_mode == "non-english" and not _is_plain_english(t)
     needs_llm = bool(
-        NON_LATIN.search(t)  # (a) a script the lexicons cannot address
-        or arabizi  # (b) Latin letters, non-Latin language
-        or forced  # (c) caller says this room is multilingual
-        # (d) real words, and every lexicon returned nothing -- no sentiment,
-        #     no toxicity, no scam. Total silence on a substantive message is
-        #     itself evidence the lexicons do not cover it.
-        or (
-            not toxic
-            and not scam
-            and friendliness is None
-            and len(words) >= 2
-            and len(t) >= 8
-        )
-        # (e) hostility seen, target unconfirmed. Rule (d) alone was not
-        #     enough: it requires `friendliness is None`, so a message that
-        #     trips a NEGATIVE keyword but fails the second-person check exits
-        #     with a CONFIDENT `toxic=False` and no escalation. That is the
-        #     worst possible combination -- wrong and silent -- and it is how
-        #     "eres una idiota" scored clean (the second-person list has no
-        #     Spanish copula). Seeing hostility without being able to confirm
-        #     its target is uncertainty, not innocence.
-        #
-        #     Cost: this escalates the "this game is trash" population too.
-        #     Measured on the golden set it moved escalation 51.4% -> 57.1%,
-        #     and safe-miss 93.8% -> 100%. See docs/failure-modes.md.
-        or (neg and not toxic)
+        _has_non_latin_letters(t)
+        or arabizi
+        # This is a caller request, not automatic English language detection.
+        or translate_mode == "non-english"
+        or (not toxic and not scam and not _TRIVIAL.fullmatch(t))
     )
 
     return Verdict(
@@ -266,7 +252,3 @@ def score(
         arabizi=arabizi,
         tier="T0",
     )
-
-
-def _is_plain_english(t: str) -> bool:
-    return not NON_LATIN.search(t) and not looks_arabizi(t)

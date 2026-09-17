@@ -1,162 +1,166 @@
 # Tiered moderation agent
 
-**An agent that mostly doesn't call a model.**
+A moderation classifier and evaluation prototype for live chat. A cheap
+deterministic tier handles known policy matches and a small set of complete
+trivial messages; unresolved content goes to a local model.
 
-Live chat is high-volume and low-entropy. Most of it is `lol`. A moderation
-pipeline that sends every message to an LLM is paying frontier prices to
-classify `GG` — so here the model is the *last resort*, and each tier has to
-earn its invocation.
+The repository implements T0, T1, and their evaluation harness. It does not
+include a live chat service, voice integration, or a tool-using T2 agent.
 
-The interesting engineering is not the model call. It is the routing: deciding
-what needs a model, and — the part that actually matters — **being honest about
-what the cheap tier could not read.**
-
-```
-every chat message
-      │
-      ▼
- [T0]  deterministic keyword scoring          <1ms · no network · no cost
-       toxic · scam · question · sentiment · needs_llm
-      │
-      │  needs_llm: non-Latin script, Arabizi, or T0-uncertain
-      ▼
- [T1]  local LLM re-score + translate         ~2.3s · Ollama · bounded
-       structured output, retries, degrades to T0 on any failure
-      │
-      ▼
- [T2]  agent + tools, for the ambiguous few   (not built — see Status)
+```text
+message
+  |
+  T0: keyword policy + explicit trivial-message allowlist
+  |
+  +-- known policy match or trivial message --> T0 verdict
+  |
+  +-- unresolved / multilingual ------------> T1: Ollama classifier
+                                                |
+                                                +-- validated result
+                                                +-- failure/overload: original T0 verdict
 ```
 
-## Measured, on 78 hand-labeled adversarial messages
+## The routing contract
 
-Reproduce with `uv run evals/harness.py --t1 --repeat 3`.
+`toxic=False, scam=False, needs_llm=True` means **unknown**, not clean.
+Consumers must abstain or wait for classification rather than interpreting
+uncertainty as permission to speak or act. Classification is advisory; a
+validated model result can still be wrong.
 
-| | T0 alone | T0 + T1 |
-|---|---:|---:|
-| recall | 53.2% | **87.2%** |
-| precision | 96.2% | **97.6%** |
-| false positive rate | 3.2% | 3.2% |
-| wall clock | 1.6ms / 78 msgs | 47 model calls |
+T0 only clears complete trivial messages such as `lol`, `GG`, `thanks!`, and
+`<3` without inference. Positive sentiment and short length do not establish
+safety: `nice, you should disappear forever` and `die` both escalate. The
+allowlist is an explicit policy choice, not a guarantee about contextual intent.
+Non-Latin letters and detected Arabizi also trigger escalation.
 
-**T1 lift: +34.0 recall points** (3 runs, spread 0.0), with precision going up
-rather than being traded away. That number is the entire justification for the
-tier existing. If it ever approaches zero, T1 should be deleted, not tuned.
-
-Two routing numbers matter more than either column:
-
-| | value | meaning |
-|---|---:|---|
-| **safe miss rate** | **100%** | every positive T0 missed, it flagged `needs_llm`. Zero confident-and-wrong verdicts. |
-| escalation rate | 60.3% | share of traffic reaching a model. High here **because this set is adversarial-weighted** — not a production throughput claim. |
-
-`safe_miss_rate` is gated at 1.0 in CI with no margin. A silent miss is a
-message the system is confidently wrong about, and downstream that reads as
-permission to act. See [docs/failure-modes.md](docs/failure-modes.md).
-
-### What these numbers do and don't show
-
-The golden set and T0's lexicon were originally written together, which made
-"T0 recall" partly a restatement of the regexes. Splitting the set exposes how
-much:
-
-| slice | n | recall | what it measures |
-|---|---:|---:|---|
-| `verbatim` | 45 | 95.8% | canonical wording — **largely self-referential**, treat as a regression guard, not a capability claim |
-| `paraphrase` | 8 | **14.3%** | natural rephrasings of the *same categories* |
-| `t0_blind` | 16 | 6.2% | Arabic script, Arabizi, sarcasm — unreachable by keywords by construction |
-
-T0 catches 1 in 7 ordinary rephrasings of categories it nominally covers. That
-is the honest capability number, and it is the strongest argument for the tier
-above it: T1 is what closes that gap.
-
-`verbatim` is gated (a lexicon edit breaking the forms it explicitly covers is
-a bug). `paraphrase` and `t0_blind` are deliberately **not** — a floor near the
-current value would just freeze it, and gating `t0_blind` would pressure
-someone into stuffing the lexicon instead of routing correctly.
-
-## Why `needs_llm` is the important field
-
-T0 is a keyword matcher. It is *structurally* blind to Arabic script, to
-Arabizi, to sarcasm, and to any insult nobody put in a list. That is fine — it
-is a cheap tier and it is allowed to miss.
-
-What is not fine is missing **silently**, because `toxic=False` is what every
-consumer downstream reads as "safe". This repo exists because of a specific
-case where that went wrong: an AI stream host that speaks aloud, gating its
-voice on a tier that could not read the message it was about to warmly greet.
-
-That case is fixture [`g053`](evals/golden/messages.jsonl), and the mechanism is
-written up in [docs/failure-modes.md](docs/failure-modes.md). The harness found
-a second instance of the same shape on its first run, in code written the same
-afternoon.
+The earlier router used positive keywords to suppress escalation. That produced
+silent misses outside the golden set despite its 100% safe-miss score. See
+[the review fixes](docs/failure-modes.md#fm-5--review-found-gaps-outside-the-golden-set).
 
 ## Quickstart
 
 ```bash
-uv sync
-uv run pytest                        # unit tests, no network
-uv run evals/harness.py              # T0 only — no model needed
+uv sync --locked
+uv run pytest -q
+uv run evals/harness.py
+uv run tools/check_wheel.py
 ```
 
-For the model tier, with [Ollama](https://ollama.com) running:
+These checks require no model. The wheel check builds and installs the package
+outside the checkout to verify that its default blocklist is actually shipped.
+
+For T1, with Ollama running:
 
 ```bash
-uv sync --extra llm
+uv sync --locked --extra llm
 ollama pull qwen3.5
-uv run evals/harness.py --t1
+uv run --extra llm evals/harness.py --t1 --repeat 3 --json docs/eval-results.json
 ```
 
-The harness exits non-zero when a threshold in
-[`evals/thresholds.toml`](evals/thresholds.toml) is breached, so a prompt tweak
-that quietly costs recall fails the build.
+Every repeat must meet combined precision/recall/FPR, recall-lift, and successful
+inference thresholds in [thresholds.toml](evals/thresholds.toml). An outage still
+returns safe fallback objects, but fails the model quality gate. `--no-gate`
+allows diagnostic runs to exit zero on metric failures; invalid configuration
+and invalid datasets remain errors.
 
-## Layout
+CI runs unit tests, the wheel check, and the T0 gate. It **does not run Ollama**.
+Run the command above after changes to prompts, model versions, or inference
+configuration and retain its JSON report. See [validation](docs/validation.md)
+for the most recent checks and model provenance.
 
-| Path | What |
-|---|---|
-| [`src/tiermod/t0.py`](src/tiermod/t0.py) | Deterministic scorer. Pure, no I/O, no model. |
-| [`src/tiermod/t1.py`](src/tiermod/t1.py) | LangChain + Ollama re-score. Structured output; degrades to T0 on any failure. |
-| [`evals/golden/`](evals/golden/) | 78 labeled messages + [label policy](evals/golden/README.md). |
-| [`evals/metrics.py`](evals/metrics.py) | Per-slice precision/recall/FPR, plus the two routing metrics. |
-| [`evals/harness.py`](evals/harness.py) | Runner, report, CI gate. |
-| [`docs/failure-modes.md`](docs/failure-modes.md) | The two bugs, with before/after numbers. |
+## Measurements and limits
 
-## Notes on the parts that are easy to get wrong
+The unchanged golden set contains 78 synthetic, hand-labeled messages. It is
+adversarial-weighted, with 47 moderation positives and 31 negatives. It is not a
+traffic sample or a held-out capability benchmark.
 
-**Structured output, not prompt-and-parse.** T1 uses
-`with_structured_output` rather than asking for JSON in prose and parsing the
-reply. Small local models emit *almost*-JSON constantly — a prose preamble, a
-markdown fence, a trailing comma — and hand-parsing turns each of those into a
-silently dropped verdict. Moving the contract into the tool-call layer makes a
-mismatch a retry instead.
+Current results (T1 column is the final run of three passing model evaluations):
 
-**Explicit `num_ctx`.** Ollama applies its own context window at serve time and
-truncates an over-long prompt *silently*. The client value wins, so T1 always
-sends one rather than inheriting whatever the server is configured with today.
+| Metric | T0 | T0 + T1 |
+|---|---:|---:|
+| Recall | 53.2% | 85.1% |
+| Precision | 96.2% | 97.6% |
+| False positive rate | 3.2% | 3.2% |
 
-**Every failure path returns T0's verdict.** A dead Ollama, a timeout, a schema
-the model will not satisfy — all mean "no lift", never "clean". Each tier
-degrades to the one below it, which is what makes the model tier safe to
-depend on and safe to switch off.
+T0's safe miss rate on these fixtures is 100% (22/22 misses escalated).
+Escalation is 65.4% (51/78). T1 recall lift was +31.9 points on each of three
+runs. Seven positive fixtures still received confident clean verdicts after
+T1 in the final run. [Recorded results](evals/results/review-2026-09-17.json)
+include those IDs and model provenance.
 
-**The golden set is synthetic and contains no real slurs.** Both are deliberate
-engineering decisions with reasoning in
-[evals/golden/README.md](evals/golden/README.md) — live chat is other people's
-speech, and the blocklist is a substring test whose correctness does not depend
-on what the strings mean.
+The routing fix raises escalation from 60.3% to 65.4% without changing T0's
+classification scores. The existing 70% escalation ceiling remains unchanged.
+No representative traffic replay has established production throughput or the
+fraction of real messages that avoid inference.
 
-## Status
+The lexicon and original fixtures were written together. Splitting their
+results exposes the generalization gap:
 
-T0, T1, the golden set, the metrics, and the CI gate are built and measured.
+| Slice | Messages | T0 recall |
+|---|---:|---:|
+| Canonical wording (`verbatim`) | 45 | 95.8% |
+| Natural rephrasings (`paraphrase`) | 8 | 14.3% |
+| Structural blind spots (`t0_blind`) | 16 | 6.2% |
 
-**T2 is not built.** It is the ~1% where a decision genuinely depends on a
-viewer's history plus current room state, and it is the only tier that should
-be an agent in the `create_agent` sense — tools, a bounded loop, an advisory
-result. Building it before the eval harness existed would have meant no way to
-tell whether it helped.
+The original model run reported 87.2% combined recall. The current result is
+85.1%; the older number describes the earlier routing/schema. The T1 thresholds
+are acceptance targets and were not lowered to accommodate this change.
+
+## Library use
+
+```python
+from tiermod import t0, t1
+from tiermod.schema import Message
+
+message = Message(id="incoming-1", text="can you play the other map next")
+verdict = t0.score(message.text)
+if verdict.needs_llm:
+    verdict = t1.score_one(message, verdict)
+
+# A consumer must check uncertainty as well as moderation flags.
+may_respond = not (verdict.needs_llm or verdict.toxic or verdict.scam)
+```
+
+Ground-truth `Label` objects belong to evaluation, not runtime callers. T1
+can only add flags: a deterministic T0 policy hit that was also escalated
+(non-Latin script, Arabizi, `translate_mode`) keeps its `toxic`/`scam`
+flags and reasons whatever the model answers. T1
+requires moderator-readable reasons for flagged results. It makes one attempt;
+invalid output or an inference exception returns the original T0 object and
+logs the failure type without logging chat text. There are no automatic retries.
+
+`T1_CONCURRENCY` bounds active calls across batches and direct calls in one
+process. Saturation immediately returns the original verdict. Batches are
+materialized; integrations must bound batch size, queueing, and cross-process
+load themselves. `T1_TIMEOUT_S` is an HTTP inactivity timeout, not an end-to-end
+deadline. The client requests an 8192-token context and at most 512 generated
+tokens; integrations must also limit input size.
+
+## Blocklist and configuration
+
+The packaged [blocklist](src/tiermod/blocklist.json) contains synthetic tokens
+only. Set `BLOCKLIST_PATH` to a private JSON list of nonempty strings before
+the first score. Loading is cached for the process lifetime; restart after
+policy edits. Missing/unreadable files, malformed JSON, and invalid entries
+raise `BlocklistError` rather than silently disabling policy. An explicit `[]`
+disables blocklist matching. Load the policy during application startup:
+
+```python
+from tiermod.t0 import load_blocklist
+load_blocklist()
+```
+
+[.env.example](.env.example) lists environment settings. The library does not
+automatically load a `.env` file; export settings through your shell or launcher.
+`translate_mode="non-english"` explicitly requests escalation; it is not a
+language detector.
 
 ## Provenance
 
-Extracted from a production TikTok LIVE moderation system, rebuilt clean-room.
-No viewer data, credentials, or captured chat from that system is present here,
-and none of the fixtures were written by a real person.
+Extracted from a production TikTok LIVE moderation system and rebuilt
+clean-room. No viewer data, credentials, or captured chat is included. All
+fixtures are synthetic; the upstream deployment's behavior is described as
+historical context, not functionality shipped in this repository.
+
+The [label policy](evals/golden/README.md), [failure history](docs/failure-modes.md),
+and [review plan](docs/review-plan.md) explain the evaluation and design choices.
