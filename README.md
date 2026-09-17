@@ -122,6 +122,9 @@ may_respond = not (verdict.needs_llm or verdict.toxic or verdict.scam)
 ```
 
 Ground-truth `Label` objects belong to evaluation, not runtime callers. T1
+can only add flags: a deterministic T0 policy hit that was also escalated
+(non-Latin script, Arabizi, `translate_mode`) keeps its `toxic`/`scam`
+flags and reasons whatever the model answers. T1
 requires moderator-readable reasons for flagged results. It makes one attempt;
 invalid output or an inference exception returns the original T0 object and
 logs the failure type without logging chat text. There are no automatic retries.

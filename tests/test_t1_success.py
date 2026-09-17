@@ -32,6 +32,35 @@ def test_runtime_message_and_explanation(monkeypatch):
     assert verdict.question and verdict.arabizi and not verdict.needs_llm
 
 
+def test_model_cannot_clear_a_deterministic_t0_hit(monkeypatch):
+    """A T0 policy match that was also escalated (non-Latin, Arabizi,
+    translate_mode) keeps its flags and reasons whatever the model says."""
+    class Model:
+        def invoke(self, _prompt):
+            return dict(toxic=False, scam=False, sentiment="neutral", lang="en",
+                        translation=None, reasons=[])
+
+    monkeypatch.setattr(t1, "_get_llm", lambda: Model())
+    base = Verdict(toxic=True, scam=True, needs_llm=True, arabizi=True,
+                   reasons=["threat", "off-platform payment"])
+    verdict = t1.score_one(Message(id="m", text="kys"), base)
+    assert verdict.tier == "T1" and not verdict.needs_llm
+    assert verdict.toxic and verdict.scam
+    assert verdict.reasons == ["threat", "off-platform payment"]
+
+
+def test_model_reasons_merge_with_t0_reasons(monkeypatch):
+    class Model:
+        def invoke(self, _prompt):
+            return dict(toxic=True, scam=False, sentiment="negative", lang="en",
+                        translation=None, reasons=["threat", "Directed insult"])
+
+    monkeypatch.setattr(t1, "_get_llm", lambda: Model())
+    base = Verdict(toxic=True, needs_llm=True, reasons=["threat"])
+    verdict = t1.score_one(Message(id="m", text="x"), base)
+    assert verdict.reasons == ["threat", "Directed insult"]
+
+
 @pytest.mark.parametrize("changes", [
     {"reasons": []}, {"reasons": [" "]}, {"sentiment": "bad"},
 ])

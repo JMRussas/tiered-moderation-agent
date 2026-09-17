@@ -141,9 +141,13 @@ def score_one(message: Message, base: Verdict) -> Verdict:
             [("system", SYSTEM), ("human", f"<message>{message.text}</message>")]
         )
         result = T1Result.model_validate(raw)
+        # T1 recovers positives; it never vetoes a deterministic T0 policy
+        # hit. A message can be both toxic and escalated (non-Latin script,
+        # Arabizi, translate_mode), and the model must not clear it.
+        reasons = base.reasons + [r for r in result.reasons if r not in base.reasons]
         return Verdict(
-            toxic=result.toxic,
-            scam=result.scam,
+            toxic=base.toxic or result.toxic,
+            scam=base.scam or result.scam,
             question=base.question,
             friendliness={"positive": 0.6, "neutral": 0.0, "negative": -0.6}[result.sentiment],
             needs_llm=False,
@@ -151,7 +155,7 @@ def score_one(message: Message, base: Verdict) -> Verdict:
             tier="T1",
             lang=result.lang,
             translation=result.translation,
-            reasons=result.reasons,
+            reasons=reasons,
         )
     except Exception as exc:
         # Exception messages may contain private chat. Record only the type.
