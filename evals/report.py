@@ -248,7 +248,8 @@ class Provenance(BaseModel):
     # What was scored and what gated it. These are the two inputs a reader
     # must check before comparing artifacts.
     dataset: FileRef
-    thresholds: FileRef
+    # None for a replay run, which applies no gate.
+    thresholds: FileRef | None = None
     hashes: dict[str, str]
     python: str
     packages: dict[str, str | None]
@@ -378,7 +379,7 @@ def _file_ref(path: Path) -> FileRef:
 
 
 def collect_provenance(*, command: Sequence[str], inference: dict | None,
-                       dataset: Path, thresholds: Path) -> Provenance:
+                       dataset: Path, thresholds: Path | None) -> Provenance:
     unavailable: dict[str, str] = {}
     hashes: dict[str, str] = {}
     for rel in HASHED_INPUTS:
@@ -397,7 +398,7 @@ def collect_provenance(*, command: Sequence[str], inference: dict | None,
         command=list(command),
         git=git,
         dataset=_file_ref(dataset),
-        thresholds=_file_ref(thresholds),
+        thresholds=_file_ref(thresholds) if thresholds is not None else None,
         hashes=hashes,
         python=sys.version.split()[0],
         packages=collect_packages(),

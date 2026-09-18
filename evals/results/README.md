@@ -21,6 +21,21 @@ The second command needs an Ollama server with the configured model pulled
 `T1_NUM_CTX`, `T1_CONCURRENCY`, and `T1_TIMEOUT_S`; the values in effect are
 recorded under `provenance.inference`.
 
+## Replay unlabeled traffic
+
+```bash
+uv run evals/replay.py data/replay/<creator>.jsonl --json evals/results/replay-<creator>.json
+uv run --extra llm evals/replay.py data/replay/<creator>.jsonl --t1 --t1-limit 500 --json ...
+```
+
+Input rows are `{"id", "text", "ts", "session"?}` with no labels. The report
+is routing and load, not quality: escalation rate and its causes, T0 flag
+counts and reasons, escalation by message length, offered load per minute,
+per-session escalation, and (with `--t1`) status counts, latency, throughput,
+and what the model resolved the escalated subset as. The artifact carries
+aggregates only; `--per-message` writes routes and statuses to a separate
+file that stays with the private data. `data/replay/` is gitignored.
+
 ## Compare two runs
 
 ```bash
