@@ -182,7 +182,13 @@ def evaluate(
     pairs = list(pairs)
 
     slices = []
-    for name, pred in SLICES.items():
+    # Fixed slices first, then one per fixture category. Category slices let
+    # a dataset with its own taxonomy (the holdout) be read on its own terms
+    # instead of through golden-set assertions like `t0_blind`.
+    predicates = dict(SLICES)
+    for category in sorted({l.category for l, _ in pairs}):
+        predicates[f"category:{category}"] = (lambda c: lambda l: l.category == c)(category)
+    for name, pred in predicates.items():
         rows = [(l, v) for l, v in pairs if pred(l)]
         if not rows:
             continue

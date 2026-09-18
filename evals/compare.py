@@ -55,6 +55,9 @@ def compare(a: Artifact, b: Artifact) -> str:
         ("server", (pa.model.server_version if pa.model else None) or "unavailable",
          (pb.model.server_version if pb.model else None) or "unavailable"),
         ("python", pa.python, pb.python),
+        ("dataset", f"{pa.dataset.path} {pa.dataset.sha256[:8]}", f"{pb.dataset.path} {pb.dataset.sha256[:8]}"),
+        ("thresholds", f"{pa.thresholds.path} {pa.thresholds.sha256[:8]}",
+         f"{pb.thresholds.path} {pb.thresholds.sha256[:8]}"),
     ]
     for name, x, y in rows:
         mark = "" if x == y else "   <- differs"
