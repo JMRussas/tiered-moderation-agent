@@ -98,6 +98,11 @@ classification scores. The existing 70% escalation ceiling remains unchanged.
 No representative traffic replay has established production throughput or the
 fraction of real messages that avoid inference.
 
+An independent holdout set is being built under
+[evals/holdout/](evals/holdout/README.md): generated in a session with no
+repository access, verified blind by a second model, adjudicated by a human,
+and frozen before any classifier runs on it. No holdout numbers exist yet.
+
 The lexicon and original fixtures were written together. Splitting their
 results exposes the generalization gap:
 

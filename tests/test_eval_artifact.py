@@ -237,3 +237,46 @@ def test_compare_reports_flipped_messages_and_changed_inputs(monkeypatch, tmp_pa
     assert all(f"  {i:<8} tp  -> fn?" in text for i in recovered)
     assert "changed inputs         src/tiermod/t1.py" in text
     assert "A: pass   B: FAIL" in text
+
+
+# --- Alternate datasets --------------------------------------------------------
+
+def test_dataset_and_thresholds_are_recorded_and_applied(monkeypatch, tmp_path):
+    """The holdout is scored with its own file and its own gates; the
+    artifact says which, so two artifacts can never be compared blind."""
+    rows = load_golden()[:12]
+    dataset = tmp_path / "other.jsonl"
+    dataset.write_text("".join(json.dumps(r.model_dump()) + "\n" for r in rows),
+                       encoding="utf-8")
+    thresholds = tmp_path / "gates.toml"
+    thresholds.write_text("[routing]\nmin_safe_miss_rate = 1.0\n", encoding="utf-8")
+    code, artifact, _ = _run(monkeypatch, tmp_path, "--dataset", str(dataset),
+                             "--thresholds", str(thresholds))
+    assert code == 0
+    assert len(artifact.t0.messages) == 12
+    assert artifact.provenance.dataset.path == str(dataset.resolve())
+    assert artifact.provenance.thresholds.sha256 == report_mod._sha256(thresholds)
+    # Category slices come from the dataset's own taxonomy.
+    categories = {r.category for r in rows}
+    assert {f"category:{c}" for c in categories} <= set(artifact.t0.metrics["slices"])
+    assert artifact.t0.metrics["slices"]["all"]["n"] == 12
+
+
+def test_default_run_records_golden_and_shipped_thresholds(monkeypatch, tmp_path):
+    _, artifact, _ = _run(monkeypatch, tmp_path)
+    assert artifact.provenance.dataset.path == "evals/golden/messages.jsonl"
+    assert artifact.provenance.thresholds.path == "evals/thresholds.toml"
+    assert artifact.provenance.dataset.sha256 == \
+        artifact.provenance.hashes["evals/golden/messages.jsonl"]
+
+
+def test_holdout_thresholds_are_valid_and_t1_ready():
+    """The holdout gates must load under the same validation as the shipped
+    file, including the T1 rule set, so a --t1 run never fails on config."""
+    from metrics import evaluate
+    from tiermod import t0
+
+    pairs = [(l, t0.score(l.text)) for l in load_golden()]
+    path = report_mod.ROOT / "evals" / "holdout" / "thresholds.toml"
+    failures = harness.check_thresholds(evaluate(pairs), require_t1=True, thresholds=path)
+    assert failures == ["T1 evaluation is required but missing"]

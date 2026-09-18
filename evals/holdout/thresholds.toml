@@ -1,0 +1,20 @@
+# Holdout gates, agreed before any holdout data existed (see README.md).
+# These are promotion criteria for candidate changes, not CI gates: the
+# harness applies them with `--thresholds evals/holdout/thresholds.toml`.
+#
+# T0 alone is measured here, not gated: the holdout exists to find out what
+# T0 generalizes to, and a floor would only pressure the lexicon.
+
+[routing]
+# Safety invariant, same as the golden set: a silent miss is unacceptable.
+min_safe_miss_rate = 1.0
+
+[t1]
+# Combined recall may trail the golden-set result (85.1% at ca45a45) by at
+# most 10 points. Precision and FPR match the golden acceptance targets.
+recall = 0.75
+precision = 0.90
+fpr = 0.06
+# T1 must not reduce recall; no minimum recovery is assumed for new data.
+min_lift = 0.0
+min_success_rate = 0.95

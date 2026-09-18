@@ -75,13 +75,22 @@ def print_report(
 
     print(f"\n  {'slice':<16}{'n':>4}  {'precision':>10}{'recall':>9}{'F1':>8}{'FPR':>8}")
     print("  " + "-" * 70)
-    for s in report.slices:
+    fixed = [s for s in report.slices if not s.name.startswith("category:")]
+    categories = [s for s in report.slices if s.name.startswith("category:")]
+    for s in fixed:
         c = s.flagged
         marker = " <" if s.name in ("t0_blind", "all+t1") else ""
         print(
             f"  {s.name:<16}{s.n:>4}  {_pct(c.precision):>10}{_pct(c.recall):>9}"
             f"{_pct(c.f1):>8}{_pct(c.fpr):>8}{marker}"
         )
+    if categories:
+        print(f"\n  {'by category':<24}{'n':>4}  {'precision':>10}{'recall':>9}{'FPR':>8}")
+        print("  " + "-" * 70)
+        for s in categories:
+            c = s.flagged
+            print(f"  {s.name[len('category:'):]:<24}{s.n:>4}  {_pct(c.precision):>10}"
+                  f"{_pct(c.recall):>9}{_pct(c.fpr):>8}")
 
     r = report.routing
     print("\n  ROUTING - the two numbers the architecture rests on")
@@ -141,16 +150,18 @@ def _check_metric(failures: list[str], name: str, got: float | None,
         failures.append(f"{name} {got:.3f} {'> max' if maximum else '< min'} {limit}")
 
 
-def check_thresholds(report: Report, *, require_t1: bool = False) -> list[str]:
+def check_thresholds(report: Report, *, require_t1: bool = False,
+                     thresholds: Path | None = None) -> list[str]:
     # A missing file is a configuration error, never an implicit --no-gate.
-    cfg = tomllib.loads(THRESHOLDS.read_text(encoding="utf-8"))
+    path = thresholds or THRESHOLDS
+    cfg = tomllib.loads(path.read_text(encoding="utf-8"))
     if not cfg or set(cfg) - {"slice", "routing", "t1"}:
         raise ValueError("thresholds.toml: empty configuration or unknown section")
     allowed_t1 = VALID_METRICS | {"min_lift", "min_success_rate"}
     sections = [("routing", cfg.get("routing", {}), VALID_ROUTING),
                 ("t1", cfg.get("t1", {}), allowed_t1)]
     for name, rules in cfg.get("slice", {}).items():
-        if name not in SLICES:
+        if name not in SLICES and not name.startswith("category:"):
             raise ValueError(f"thresholds.toml: unknown slice [slice.{name}]")
         sections.append((f"slice.{name}", rules, VALID_METRICS))
     if not any(rules for _, rules, _ in sections):
@@ -268,11 +279,15 @@ def main() -> int:
     )
     ap.add_argument("--json", type=Path, help="write the versioned evaluation artifact here")
     ap.add_argument("--no-gate", action="store_true", help="report only, never fail")
+    ap.add_argument("--dataset", type=Path, default=GOLDEN,
+                    help="Label-shaped JSONL to score (default: the golden set)")
+    ap.add_argument("--thresholds", type=Path, default=THRESHOLDS,
+                    help="gate configuration (default: evals/thresholds.toml)")
     args = ap.parse_args()
 
     if args.repeat < 1:
         ap.error("--repeat must be at least 1")
-    golden = load_golden()
+    golden = load_golden(args.dataset)
 
     start = time.perf_counter()
     verdicts: list[Verdict] = [t0.score(l.text) for l in golden]
@@ -282,8 +297,8 @@ def main() -> int:
     t0_report = evaluate(pairs)
     # Validate the gate configuration, including T1 rules, before spending
     # any model time on a run whose thresholds file is broken.
-    check_thresholds(t0_report, require_t1=args.t1)
-    t0_failures = check_thresholds(t0_report)
+    check_thresholds(t0_report, require_t1=args.t1, thresholds=args.thresholds)
+    t0_failures = check_thresholds(t0_report, thresholds=args.thresholds)
     t0_pass = T0Pass(elapsed_ms=elapsed_ms, metrics=metrics_to_dict(t0_report),
                      gate_failures=t0_failures,
                      messages=[message_outcome(l, v, v) for l, v in pairs])
@@ -307,7 +322,7 @@ def main() -> int:
             results = t1_mod.classify_batch(inputs)
             t1_pairs = [(labels_by_id[m.id], o.verdict) for m, o in results]
             run_report = evaluate(pairs, t1_pairs=t1_pairs)
-            failures = check_thresholds(run_report, require_t1=True)
+            failures = check_thresholds(run_report, require_t1=True, thresholds=args.thresholds)
             run_failures.extend(f"run {run + 1}: {failure}" for failure in failures)
             if run_report.t1_lift is not None:
                 lifts.append(run_report.t1_lift)
@@ -321,7 +336,8 @@ def main() -> int:
 
     if args.json:
         artifact = Artifact(
-            provenance=collect_provenance(command=sys.argv, inference=inference),
+            provenance=collect_provenance(command=sys.argv, inference=inference,
+                                          dataset=args.dataset, thresholds=args.thresholds),
             gate={"mode": "t1" if args.t1 else "t0", "repeats": args.repeat if args.t1 else 0,
                   "passed": not failures, "failures": failures,
                   "enforced": not args.no_gate},

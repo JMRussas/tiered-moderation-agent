@@ -235,11 +235,20 @@ class Hardware(BaseModel):
     gpus: list[str] = Field(default_factory=list)
 
 
+class FileRef(BaseModel):
+    path: str      # relative to the repository root when inside it
+    sha256: str
+
+
 class Provenance(BaseModel):
     run_id: str
     timestamp_utc: str
     command: list[str]
     git: GitInfo
+    # What was scored and what gated it. These are the two inputs a reader
+    # must check before comparing artifacts.
+    dataset: FileRef
+    thresholds: FileRef
     hashes: dict[str, str]
     python: str
     packages: dict[str, str | None]
@@ -359,7 +368,17 @@ def collect_model(settings: dict, unavailable: dict[str, str]) -> ModelInfo:
     return info
 
 
-def collect_provenance(*, command: Sequence[str], inference: dict | None) -> Provenance:
+def _file_ref(path: Path) -> FileRef:
+    path = path.resolve()
+    try:
+        shown = path.relative_to(ROOT).as_posix()
+    except ValueError:
+        shown = str(path)
+    return FileRef(path=shown, sha256=_sha256(path))
+
+
+def collect_provenance(*, command: Sequence[str], inference: dict | None,
+                       dataset: Path, thresholds: Path) -> Provenance:
     unavailable: dict[str, str] = {}
     hashes: dict[str, str] = {}
     for rel in HASHED_INPUTS:
@@ -377,6 +396,8 @@ def collect_provenance(*, command: Sequence[str], inference: dict | None) -> Pro
         timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         command=list(command),
         git=git,
+        dataset=_file_ref(dataset),
+        thresholds=_file_ref(thresholds),
         hashes=hashes,
         python=sys.version.split()[0],
         packages=collect_packages(),

@@ -1,10 +1,11 @@
 """Holdout-set protocol tooling: strip labels for the blind verifier, then
 merge generator and verifier labels and list what the adjudicator must decide.
 
-    uv run evals/holdout/holdout.py strip raw/generated.jsonl > raw/text-only.jsonl
-    uv run evals/holdout/holdout.py merge raw/generated.jsonl raw/verified.jsonl \
-        --author generator-<model> --verifier verifier-<model> > raw/merged.jsonl
-    uv run evals/holdout/holdout.py freeze raw/merged.jsonl adjudicated.jsonl messages.jsonl
+    # from the repository root; H=evals/holdout
+    uv run $H/holdout.py strip $H/raw/generated.jsonl > $H/raw/text-only.jsonl
+    uv run $H/holdout.py merge $H/raw/generated.jsonl $H/raw/verified.jsonl \
+        --author generator-<model> --verifier verifier-<model> > $H/raw/merged.jsonl
+    uv run $H/holdout.py freeze $H/raw/merged.jsonl $H/adjudicated.jsonl $H/messages.jsonl
 
 Nothing here reads a classifier or the golden set. `merge` writes a row for
 every message with both proposals and a `needs_review` flag; `freeze` applies
@@ -23,16 +24,46 @@ from pathlib import Path
 DECISIONS = ("toxic", "scam", "question")
 # Fraction of agreed rows the adjudicator still spot-checks.
 SPOT_CHECK_EVERY = 5
+# Benign rows in these categories exist to tempt a false positive; they are
+# the holdout's counterpart of the golden set's `fp_trap` rows.
+TRAP_CATEGORIES = {"benign-critical", "benign-hostile-vocab", "benign-offplatform"}
+TRAP_TAGS = {"hostile-vocab-benign", "quoted"}
+
+# Required fields per file kind and the type each must have. LLM-authored
+# rows drift; a string "false" must not become a positive.
+SCHEMAS = {
+    "generated": {"id": str, "text": str, "toxic": bool, "scam": bool, "question": bool,
+                  "lang": str, "script": str, "category": str, "tags": list},
+    "verified": {"id": str, "toxic": bool, "scam": bool, "question": bool},
+    "merged": {"id": str, "text": str, "generator": dict, "verifier": dict,
+               "needs_review": bool, "category": str, "tags": list, "script": str},
+    "adjudicated": {"id": str, "toxic": bool, "scam": bool, "question": bool},
+}
 
 
-def _rows(path: Path) -> list[dict]:
+def _rows(path: Path, kind: str) -> list[dict]:
+    if not path.exists():
+        raise SystemExit(f"{path}: not found")
     rows = []
+    schema = SCHEMAS[kind]
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if line.strip():
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"{path}:{n}: {exc}") from None
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"{path}:{n}: {exc}") from None
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            raise SystemExit(f"{path}:{n}: not an object with a string id")
+        for field, typ in schema.items():
+            if field not in row:
+                raise SystemExit(f"{path}:{n} ({row['id']}): missing {field}")
+            if not isinstance(row[field], typ) or (typ is not bool and isinstance(row[field], bool)):
+                raise SystemExit(f"{path}:{n} ({row['id']}): {field} must be {typ.__name__}, "
+                                 f"got {row[field]!r}")
+        rows.append(row)
+    if not rows:
+        raise SystemExit(f"{path}: no rows")
     ids = [r["id"] for r in rows]
     if len(ids) != len(set(ids)):
         raise SystemExit(f"{path}: duplicate ids")
@@ -45,20 +76,20 @@ def _emit(rows) -> None:
 
 
 def cmd_strip(args) -> int:
-    _emit({"id": r["id"], "text": r["text"]} for r in _rows(args.generated))
+    _emit({"id": r["id"], "text": r["text"]} for r in _rows(args.generated, "generated"))
     return 0
 
 
 def cmd_merge(args) -> int:
-    generated = _rows(args.generated)
-    verified = {r["id"]: r for r in _rows(args.verified)}
+    generated = _rows(args.generated, "generated")
+    verified = {r["id"]: r for r in _rows(args.verified, "verified")}
     missing = [r["id"] for r in generated if r["id"] not in verified]
     if missing:
         raise SystemExit(f"verifier output missing ids: {', '.join(missing)}")
     merged = []
     for i, g in enumerate(generated):
         v = verified[g["id"]]
-        disagreements = [d for d in DECISIONS if bool(g[d]) != bool(v[d])]
+        disagreements = [d for d in DECISIONS if g[d] != v[d]]
         review = (
             bool(disagreements)
             or v.get("confidence") == "low"
@@ -68,9 +99,9 @@ def cmd_merge(args) -> int:
         )
         merged.append({
             "id": g["id"], "text": g["text"],
-            "generator": {d: bool(g[d]) for d in DECISIONS} | {
+            "generator": {d: g[d] for d in DECISIONS} | {
                 "lang": g.get("lang"), "rationale": g.get("rationale", "")},
-            "verifier": {d: bool(v[d]) for d in DECISIONS} | {
+            "verifier": {d: v[d] for d in DECISIONS} | {
                 "lang": v.get("lang"), "confidence": v.get("confidence"),
                 "rationale": v.get("rationale", "")},
             "disagreements": disagreements,
@@ -88,8 +119,16 @@ def cmd_merge(args) -> int:
 
 
 def cmd_freeze(args) -> int:
-    merged = _rows(args.merged)
-    decided = {r["id"]: r for r in _rows(args.adjudicated)} if args.adjudicated.exists() else {}
+    merged = _rows(args.merged, "merged")
+    # The adjudication file must exist, even if empty: a wrong path would
+    # otherwise read as "nothing decided yet" and list every flagged row.
+    if not args.adjudicated.exists():
+        raise SystemExit(f"{args.adjudicated}: not found (create it, empty if needed)")
+    decided = ({r["id"]: r for r in _rows(args.adjudicated, "adjudicated")}
+               if args.adjudicated.read_text(encoding="utf-8").strip() else {})
+    unknown = sorted(set(decided) - {m["id"] for m in merged})
+    if unknown:
+        raise SystemExit(f"adjudicated ids not in the merged file: {', '.join(unknown)}")
     undecided = [m["id"] for m in merged if m["needs_review"] and m["id"] not in decided]
     if undecided:
         raise SystemExit(f"{len(undecided)} rows need adjudication: {', '.join(undecided[:20])}"
@@ -101,13 +140,18 @@ def cmd_freeze(args) -> int:
         labels = {k: d[k] for k in DECISIONS} if d else m["generator"]
         if d and any(d[k] != m["generator"][k] for k in DECISIONS):
             changed += 1
+        positive = bool(labels["toxic"] or labels["scam"])
         row = {
             "id": m["id"], "text": m["text"], **{k: bool(labels[k]) for k in DECISIONS},
             "lang": m["lang"], "script": m["script"], "category": m["category"],
-            # A fixture assertion: non-Latin script is unreadable by Latin text
-            # processing whatever the implementation. Set mechanically.
-            "t0_blind": m["script"] != "latin" or m["lang"] == "ar-arabizi",
-            "fp_trap": "hostile-vocab-benign" in m["tags"] or "quoted" in m["tags"],
+            # Golden-set conventions, applied mechanically: `t0_blind` marks
+            # POSITIVES whose text is outside Latin processing (the golden set
+            # also hand-marks English evasion rows; the holdout does not, so
+            # read the holdout by its `category:` slices instead). `fp_trap`
+            # marks BENIGN rows written to tempt a false positive.
+            "t0_blind": positive and (m["script"] != "latin" or m["lang"] == "ar-arabizi"),
+            "fp_trap": not positive and (m["category"] in TRAP_CATEGORIES
+                                         or bool(TRAP_TAGS & set(m["tags"]))),
             "note": (d or {}).get("note", ""),
             "tags": sorted(set(m["tags"]) | {"synthetic", m["author"], m["verifier_id"]}
                            | ({"adjudicated"} if d else set())),

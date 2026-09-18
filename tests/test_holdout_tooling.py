@@ -22,7 +22,7 @@ def _jsonl(path: Path, rows) -> Path:
 
 def _run(*args):
     return subprocess.run([sys.executable, str(TOOL), *map(str, args)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
 
 
 GENERATED = [
@@ -128,3 +128,70 @@ def test_freeze_writes_label_rows_the_harness_loads(tmp_path):
     assert {"synthetic", "generator-a", "verifier-b"} <= set(labels["h003"].tags)
     assert "3 positive, 3 benign; 4 adjudicated, 0 labels changed" in out.stderr
     assert "\r\n" not in final.read_bytes().decode()
+
+
+def test_rows_are_validated_with_the_row_id(tmp_path):
+    bad = [dict(GENERATED[0]), dict(GENERATED[1])]
+    bad[1]["toxic"] = "false"          # a string is not a label
+    gen = _jsonl(tmp_path / "g.jsonl", bad)
+    out = _run("strip", gen)
+    assert out.returncode != 0 and "(h002): toxic must be bool, got 'false'" in out.stderr
+
+    del bad[1]["toxic"]
+    gen = _jsonl(tmp_path / "g.jsonl", bad)
+    out = _run("strip", gen)
+    assert out.returncode != 0 and "(h002): missing toxic" in out.stderr
+
+    out = _run("strip", tmp_path / "missing.jsonl")
+    assert out.returncode != 0 and "not found" in out.stderr
+    out = _run("strip", _jsonl(tmp_path / "empty.jsonl", []))
+    assert out.returncode != 0 and "no rows" in out.stderr
+
+
+def test_freeze_rejects_unknown_ids_and_missing_file(tmp_path):
+    gen = _jsonl(tmp_path / "g.jsonl", GENERATED)
+    ver = _jsonl(tmp_path / "v.jsonl", VERIFIED)
+    merged = tmp_path / "m.jsonl"
+    merged.write_text(_run("merge", gen, ver, "--author", "a", "--verifier", "b").stdout,
+                      encoding="utf-8")
+    out = _run("freeze", merged, tmp_path / "nope.jsonl", tmp_path / "out.jsonl")
+    assert out.returncode != 0 and "nope.jsonl: not found" in out.stderr
+    adjudicated = _jsonl(tmp_path / "a.jsonl", [
+        {"id": "h999", "toxic": True, "scam": False, "question": False, "note": "typo"},
+    ])
+    out = _run("freeze", merged, adjudicated, tmp_path / "out.jsonl")
+    assert out.returncode != 0 and "not in the merged file: h999" in out.stderr
+
+
+def test_fixture_assertions_follow_golden_conventions(tmp_path):
+    """`t0_blind` marks non-Latin POSITIVES; `fp_trap` marks BENIGN trap-shaped
+    rows. Both are set from labels and metadata, never from a classifier."""
+    rows = [
+        {**GENERATED[3], "id": "p1"},                                      # Arabic, toxic
+        {**GENERATED[3], "id": "n1", "toxic": False, "question": False},   # Arabic, benign
+        {**GENERATED[0], "id": "z1", "lang": "ar-arabizi", "scam": True},  # Arabizi, scam
+        {**GENERATED[0], "id": "c1", "category": "benign-critical", "tags": []},
+        {**GENERATED[0], "id": "o1", "category": "benign-offplatform", "tags": []},
+        {**GENERATED[1], "id": "q1", "tags": ["quoted"]},                  # toxic + quoted
+        {**GENERATED[0], "id": "b1"},                                      # plain benign
+    ]
+    verified = [{"id": r["id"], "toxic": r["toxic"], "scam": r["scam"],
+                 "question": r["question"], "confidence": "high"} for r in rows]
+    gen, ver = _jsonl(tmp_path / "g.jsonl", rows), _jsonl(tmp_path / "v.jsonl", verified)
+    merged = tmp_path / "m.jsonl"
+    merged.write_text(_run("merge", gen, ver, "--author", "a", "--verifier", "b").stdout,
+                      encoding="utf-8")
+    flagged = [json.loads(l)["id"] for l in merged.read_text(encoding="utf-8").splitlines()
+               if json.loads(l)["needs_review"]]
+    by_id = {r["id"]: r for r in rows}
+    adjudicated = _jsonl(tmp_path / "a.jsonl", [
+        {"id": i, "toxic": by_id[i]["toxic"], "scam": by_id[i]["scam"],
+         "question": by_id[i]["question"], "note": ""} for i in flagged])
+    final = tmp_path / "messages.jsonl"
+    out = _run("freeze", merged, adjudicated, final)
+    assert out.returncode == 0, out.stderr
+    labels = {l.id: l for l in load_golden(final)}
+    assert labels["p1"].t0_blind and labels["z1"].t0_blind
+    assert not labels["n1"].t0_blind and not labels["b1"].t0_blind
+    assert labels["c1"].fp_trap and labels["o1"].fp_trap
+    assert not labels["q1"].fp_trap and not labels["b1"].fp_trap and not labels["n1"].fp_trap

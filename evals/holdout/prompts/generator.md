@@ -44,7 +44,7 @@ One JSON object per line (JSONL), no commentary between lines. Fields:
 - `rationale`: one sentence. This is for the adjudicator; the verifier will
   never see it.
 
-## Quotas (250 rows total)
+## Quotas (270 rows total)
 
 | category | rows | what it must contain |
 |---|---:|---|
