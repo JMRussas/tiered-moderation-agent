@@ -76,6 +76,9 @@ def test_artifact_has_no_text_and_per_message_is_opt_in(monkeypatch, tmp_path):
         assert r["text"] not in text
     art = json.loads(text)
     assert art["kind"] == "replay" and art["provenance"]["thresholds"] is None
+    assert art["claims"]["labels"] == "none" and "correctness" in art["claims"]["does_not_measure"]
+    assert art["claims"]["reference_model"] == t1.MODEL
+    assert not {"accuracy", "precision", "recall", "f1"} & set(json.dumps(art).split('"'))
     assert art["t1"]["evaluated"] == 5 and art["t1"]["sampled"] is True
     assert sum(art["t1"]["status_counts"].values()) == 5
     assert "_outcomes" not in art["t1"]

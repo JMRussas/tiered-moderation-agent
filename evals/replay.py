@@ -288,6 +288,18 @@ def main() -> int:
             "schema_version": SCHEMA_VERSION,
             "kind": "replay",
             "name": name,
+            # What a reader may conclude from this file, stated up front so the
+            # numbers cannot be quoted as something they are not.
+            "claims": {
+                "labels": "none",
+                "measures": "routing, offered load, and model cost of THIS repository's "
+                            "tiers on the replayed traffic",
+                "does_not_measure": "correctness. No human-verified labels exist for this "
+                                    "traffic; T1 outcomes are the model's opinion, not ground truth.",
+                "reference_model": (t1s or {}).get("inference", {}).get("model"),
+                "note": "Movement in these numbers across runs is a drift signal for the "
+                        "pipeline, not evidence of quality.",
+            },
             "provenance": collect_provenance(
                 command=sys.argv, inference=(t1s or {}).get("inference"),
                 dataset=args.replay, thresholds=None).model_dump(mode="json"),
