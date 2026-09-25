@@ -1,5 +1,9 @@
 # Tiered moderation agent
 
+[![CI](https://github.com/JMRussas/tiered-moderation-agent/actions/workflows/eval.yml/badge.svg)](https://github.com/JMRussas/tiered-moderation-agent/actions/workflows/eval.yml)
+
+**[Engineering case study](docs/case-study.md)** — decisions, failure analysis, verification, and limits.
+
 A moderation classifier and evaluation prototype for live chat. A cheap
 deterministic tier handles known policy matches and a small set of complete
 trivial messages; unresolved content goes to a local model.
