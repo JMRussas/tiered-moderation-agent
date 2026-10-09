@@ -3,6 +3,8 @@ name = "tiered-moderation-agent"
 version = "0.1.0"
 description = "A live-chat moderation pipeline where the agent is the last resort, not the default"
 requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2.9",
 ]
@@ -20,7 +22,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

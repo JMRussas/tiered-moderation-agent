@@ -181,3 +181,7 @@ historical context, not functionality shipped in this repository.
 
 The [label policy](evals/golden/README.md), [failure history](docs/failure-modes.md),
 and [review plan](docs/review-plan.md) explain the evaluation and design choices.
+
+## License
+
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
